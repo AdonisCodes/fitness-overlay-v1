@@ -87,18 +87,36 @@ impl GlyphCache {
     }
 
     pub fn measure(&mut self, text: &str, px: f32, tabular: bool, tracking: f32) -> f32 {
+        self.measure_extents(text, px, tabular, tracking).0
+    }
+
+    /// Returns `(advance_width, ink_right_extent)` from the start pen position.
+    /// Ink extent catches glyphs whose drawn pixels extend past their advance
+    /// (e.g. `/` in `km/h`).
+    pub fn measure_extents(
+        &mut self,
+        text: &str,
+        px: f32,
+        tabular: bool,
+        tracking: f32,
+    ) -> (f32, f32) {
         let pxk = px.round() as u32;
         let tab = if tabular { self.digit_advance(pxk) } else { 0.0 };
-        let mut w = 0.0f32;
+        let mut pen = 0.0f32;
+        let mut ink_right = 0.0f32;
         for c in text.chars() {
-            let adv = if tabular && c.is_ascii_digit() {
-                tab
+            let g = self.ensure(c, pxk);
+            let (adv, centering) = if tabular && c.is_ascii_digit() {
+                (tab, (tab - g.advance) / 2.0)
             } else {
-                self.ensure(c, pxk).advance
+                (g.advance, 0.0)
             };
-            w += adv + tracking;
+            let glyph_right = pen + centering + g.off_x as f32 + g.w as f32;
+            ink_right = ink_right.max(glyph_right);
+            pen += adv + tracking;
         }
-        (w - tracking).max(0.0)
+        let advance = (pen - tracking).max(0.0);
+        (advance, ink_right.max(advance))
     }
 
     /// Draw `text` with its baseline at (`x`, `y_baseline`). Returns the width.

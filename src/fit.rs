@@ -134,11 +134,12 @@ impl Timeline {
             0.0
         };
 
+        // Hold the last known value when a side is missing — forward-fill at
+        // decode time covers most cases; this handles any remaining holes.
         let lerp = |x: Option<f64>, y: Option<f64>| -> Option<f64> {
             match (x, y) {
                 (Some(x), Some(y)) => Some(x + (y - x) * f),
-                (Some(x), None) => Some(x),
-                (None, Some(y)) => Some(y),
+                (Some(x), None) | (None, Some(x)) => Some(x),
                 (None, None) => None,
             }
         };
@@ -325,6 +326,11 @@ fn build_timeline(records: &[FitDataRecord]) -> Result<Timeline> {
     samples.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap());
     let start_utc = start_utc.unwrap();
 
+    // Garmin smart recording often omits unchanged fields from individual
+    // records (e.g. a GPS-only point with no HR/distance). Carry the last
+    // known value forward so snapshots don't flicker to "--".
+    forward_fill_sparse(&mut samples);
+
     let has_gps = samples.iter().any(|s| s.lat.is_some() && s.lon.is_some());
     let sport = detect_sport(sport.as_deref(), sub_sport.as_deref(), has_gps);
 
@@ -356,6 +362,32 @@ fn build_timeline(records: &[FitDataRecord]) -> Result<Timeline> {
         pauses,
         has_gps,
     })
+}
+
+/// Copy the most recent non-null scalar fields into later sparse records.
+fn forward_fill_sparse(samples: &mut [Sample]) {
+    for i in 1..samples.len() {
+        let prev = samples[i - 1].clone();
+        let cur = &mut samples[i];
+        if cur.hr.is_none() {
+            cur.hr = prev.hr;
+        }
+        if cur.speed.is_none() {
+            cur.speed = prev.speed;
+        }
+        if cur.dist.is_none() {
+            cur.dist = prev.dist;
+        }
+        if cur.alt.is_none() {
+            cur.alt = prev.alt;
+        }
+        if cur.cadence.is_none() {
+            cur.cadence = prev.cadence;
+        }
+        if cur.power.is_none() {
+            cur.power = prev.power;
+        }
+    }
 }
 
 /// Centered moving average over ~5 samples for display-friendly speed.
@@ -478,6 +510,48 @@ mod tests {
         assert!((tl.moving_time(100.0) - 80.0).abs() < 1e-9);
         let s = tl.snapshot(15.0);
         assert!(s.paused);
+    }
+
+    #[test]
+    fn forward_fill_keeps_hr_and_distance_through_sparse_records() {
+        let mut samples = vec![
+            Sample {
+                t: 0.0,
+                hr: Some(120.0),
+                dist: Some(0.0),
+                speed: Some(3.0),
+                ..Default::default()
+            },
+            Sample {
+                t: 5.0,
+                lat: Some(47.0),
+                lon: Some(8.0),
+                ..Default::default()
+            },
+            Sample {
+                t: 10.0,
+                hr: Some(125.0),
+                dist: Some(50.0),
+                speed: Some(3.2),
+                ..Default::default()
+            },
+        ];
+        forward_fill_sparse(&mut samples);
+        assert_eq!(samples[1].hr, Some(120.0));
+        assert_eq!(samples[1].dist, Some(0.0));
+        assert_eq!(samples[1].speed, Some(3.0));
+
+        let tl = Timeline {
+            start_utc: Utc.with_ymd_and_hms(2026, 6, 7, 15, 0, 0).unwrap(),
+            sport: SportKind::OutdoorRun,
+            utc_offset_secs: None,
+            samples,
+            pauses: vec![],
+            has_gps: true,
+        };
+        let snap = tl.snapshot(5.0);
+        assert_eq!(snap.hr, Some(120.0));
+        assert_eq!(snap.dist, Some(0.0));
     }
 
     #[test]

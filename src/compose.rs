@@ -47,17 +47,42 @@ pub fn encoder_args(pref: EncoderPref) -> Vec<&'static str> {
     }
 }
 
+/// Options controlling how overlay frames are generated and muxed.
+#[derive(Debug, Clone, Copy)]
+pub struct ComposeOptions {
+    /// When set, generate and pipe overlay frames at this rate instead of every
+    /// source frame. Output video is also encoded at this rate (fast preview).
+    pub preview_fps: Option<f64>,
+}
+
+impl Default for ComposeOptions {
+    fn default() -> Self {
+        Self { preview_fps: None }
+    }
+}
+
 /// Composite overlay frames produced by `frame_fn` onto `video`, writing the
-/// result to `out_path`. `frame_fn(frame_index, buf)` must fill `buf` with
-/// straight RGBA pixels for that frame.
+/// result to `out_path`. `frame_fn(t_video, buf)` fills `buf` with straight
+/// RGBA pixels at source time `t_video` in seconds.
 pub fn compose(
     video: &VideoInfo,
     out_path: &Path,
     enc_args: &[&str],
-    mut frame_fn: impl FnMut(u64, &mut [u8]) -> Result<()>,
+    opts: ComposeOptions,
+    mut frame_fn: impl FnMut(f64, &mut [u8]) -> Result<()>,
 ) -> Result<()> {
+    let overlay_fps = opts.preview_fps.unwrap_or(video.fps);
+    if overlay_fps <= 0.0 {
+        bail!("overlay frame rate must be positive");
+    }
+    let fps_str = if opts.preview_fps.is_some() {
+        format!("{overlay_fps:.6}")
+    } else {
+        video.fps_str.clone()
+    };
+    let total_frames = (video.duration * overlay_fps).ceil().max(1.0) as u64;
+
     let size = format!("{}x{}", video.width, video.height);
-    let total_frames = (video.duration * video.fps).round().max(1.0) as u64;
 
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-hide_banner", "-loglevel", "error", "-nostats", "-y"])
@@ -65,7 +90,7 @@ pub fn compose(
         .arg(&video.path)
         .args(["-f", "rawvideo", "-pix_fmt", "rgba"])
         .args(["-video_size", &size])
-        .args(["-framerate", &video.fps_str])
+        .args(["-framerate", &fps_str])
         .args(["-i", "pipe:0"])
         .args([
             "-filter_complex",
@@ -75,9 +100,11 @@ pub fn compose(
     if video.has_audio {
         cmd.args(["-map", "0:a", "-c:a", "copy"]);
     }
-    cmd.args(enc_args)
-        .args(["-pix_fmt", "yuv420p", "-movflags", "+faststart"])
-        .arg(out_path)
+    cmd.args(enc_args).args(["-pix_fmt", "yuv420p", "-movflags", "+faststart"]);
+    if opts.preview_fps.is_some() {
+        cmd.args(["-r", &fps_str]);
+    }
+    cmd.arg(out_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::null());
 
@@ -90,18 +117,17 @@ pub fn compose(
     let mut broken_pipe = false;
 
     for idx in 0..total_frames {
-        frame_fn(idx, &mut buf)?;
+        let t_v = idx as f64 / overlay_fps;
+        frame_fn(t_v, &mut buf)?;
         match stdin.write_all(&buf) {
             Ok(()) => wrote += 1,
             Err(e) if e.kind() == ErrorKind::BrokenPipe => {
-                // The main video stream ended slightly before our frame
-                // estimate; ffmpeg closed the pipe. That's fine near the end.
                 broken_pipe = true;
                 break;
             }
             Err(e) => return Err(e).context("writing overlay frames to ffmpeg"),
         }
-        if idx % 150 == 0 || idx + 1 == total_frames {
+        if idx % 30 == 0 || idx + 1 == total_frames {
             eprint!(
                 "\r  {} {:>5.1}%",
                 out_path.file_name().and_then(|n| n.to_str()).unwrap_or(""),

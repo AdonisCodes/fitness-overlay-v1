@@ -43,6 +43,11 @@ struct Cli {
     /// Video encoder selection.
     #[arg(long, value_enum, default_value_t = compose::EncoderPref::Auto)]
     encoder: compose::EncoderPref,
+
+    /// Fast preview: render overlay and encode output at this fps (e.g. `1`).
+    /// Skips full frame-by-frame rendering — useful for layout/sync checks.
+    #[arg(long)]
+    preview_fps: Option<f64>,
 }
 
 /// Parse "+02:00", "-05:30", "+0200" or "2" into seconds.
@@ -147,7 +152,7 @@ fn main() -> Result<()> {
             continue;
         };
         eprintln!(
-            "{stem}: {}x{} @ {:.2} fps, {} long; overlay visible {} - {} (activity {} - {})",
+            "{stem}: {}x{} @ {:.2} fps, {} long; overlay visible {} - {} (activity {} - {}){}",
             info.width,
             info.height,
             info.fps,
@@ -156,15 +161,19 @@ fn main() -> Result<()> {
             render::fmt_duration(hi),
             render::fmt_duration(lo + sync.offset),
             render::fmt_duration(hi + sync.offset),
+            cli.preview_fps
+                .map(|p| format!("; preview @ {p:.3} fps"))
+                .unwrap_or_default(),
         );
 
         let mut renderer =
             render::OverlayRenderer::new(&timeline, info.width, info.height, cli.max_hr)?;
         let out_path = cli.out.join(format!("{stem}_overlay.mp4"));
-        let fps = info.fps;
         let offset = sync.offset;
-        compose::compose(&info, &out_path, &enc_args, |idx, buf| {
-            let t_v = idx as f64 / fps;
+        let compose_opts = compose::ComposeOptions {
+            preview_fps: cli.preview_fps,
+        };
+        compose::compose(&info, &out_path, &enc_args, compose_opts, |t_v, buf| {
             if t_v < lo || t_v > hi {
                 buf.fill(0);
                 return Ok(());

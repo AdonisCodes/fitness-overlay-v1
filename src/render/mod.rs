@@ -22,9 +22,14 @@ use tiny_skia::{
 const FONT_BOLD: &[u8] = include_bytes!("../../assets/fonts/Inter-Bold.otf");
 const FONT_SEMI: &[u8] = include_bytes!("../../assets/fonts/Inter-SemiBold.otf");
 
-/// Design space is 1080 units wide; everything scales with video width.
+/// Design space is 1080 units on the short side; scale from min(width, height)
+/// so landscape and portrait clips get similarly sized HUD elements.
 const DESIGN_W: f32 = 1080.0;
 const MARGIN: f32 = 48.0;
+/// Landscape clips use a compact bottom-left HUD instead of a full-width bar.
+const LANDSCAPE_PANEL_WIDTH_FRAC: f32 = 0.38;
+/// Minimum gap between the rightmost unit ink and the column divider.
+const UNIT_DIVIDER_GAP: f32 = 40.0;
 
 const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const LABEL: [f32; 4] = [1.0, 1.0, 1.0, 0.72];
@@ -176,7 +181,14 @@ pub fn fmt_thousands(v: i64) -> String {
 
 struct Cell {
     kind: MetricKind,
-    text_x: f32,
+    /// Left edge of this column in frame pixels.
+    x: f32,
+    /// Column width in frame pixels.
+    w: f32,
+    /// Horizontal inset from both column edges for labels/values.
+    pad: f32,
+    /// Extra inset for the unit's right edge (accounts for glyph ink + divider gap).
+    unit_inset: f32,
     value_baseline: f32,
     value_px: f32,
     unit_px: f32,
@@ -234,13 +246,16 @@ pub struct OverlayRenderer {
 
 impl OverlayRenderer {
     pub fn new(tl: &Timeline, width: u32, height: u32, max_hr: f64) -> Result<OverlayRenderer> {
-        let s = width as f32 / DESIGN_W;
+        let w = width as f32;
+        let h = height as f32;
+        let landscape = w > h;
+        // Scale from the short side so a 1920×1080 clip doesn't blow up vs 1080×1920.
+        let s = w.min(h) / DESIGN_W;
         let mut static_layer =
             Pixmap::new(width, height).context("allocating static layer pixmap")?;
         let frame = Pixmap::new(width, height).context("allocating frame pixmap")?;
         let mut bold = GlyphCache::new(FONT_BOLD);
         let mut semi = GlyphCache::new(FONT_SEMI);
-        let hd = height as f32 / s; // design-space height
 
         // ---- time chip (top-left) ----
         let chip_px = 54.0 * s;
@@ -271,10 +286,30 @@ impl OverlayRenderer {
 
         // ---- bottom metric panel ----
         let kinds = visible_metrics(tl);
-        let panel_x = MARGIN * s;
-        let panel_w = (DESIGN_W - 2.0 * MARGIN) * s;
-        let panel_h = 200.0 * s;
-        let panel_y = (hd - 120.0 - 200.0) * s;
+        let bottom_gap = if landscape { MARGIN * s } else { 120.0 * s };
+        let (panel_x, panel_w, panel_h, value_px, label_px, unit_px, cell_pad) = if landscape {
+            let panel_w = w * LANDSCAPE_PANEL_WIDTH_FRAC;
+            (
+                MARGIN * s,
+                panel_w,
+                160.0 * s,
+                52.0 * s,
+                20.0 * s,
+                24.0 * s,
+                30.0 * s,
+            )
+        } else {
+            (
+                MARGIN * s,
+                w - 2.0 * MARGIN * s,
+                200.0 * s,
+                72.0 * s,
+                24.0 * s,
+                30.0 * s,
+                40.0 * s,
+            )
+        };
+        let panel_y = h - bottom_gap - panel_h;
         let mut cells = Vec::new();
         if !kinds.is_empty() {
             fill_rrect(
@@ -283,35 +318,34 @@ impl OverlayRenderer {
                 panel_y,
                 panel_w,
                 panel_h,
-                28.0 * s,
+                if landscape { 22.0 * s } else { 28.0 * s },
                 PANEL_BG,
             );
             let n = kinds.len();
             let cw = panel_w / n as f32;
-            let label_px = 24.0 * s;
             for (i, &kind) in kinds.iter().enumerate() {
                 let cx = panel_x + i as f32 * cw;
-                let mut text_x = cx + 34.0 * s;
-                let label_baseline = panel_y + 64.0 * s;
+                let mut text_x = cx + cell_pad;
+                let label_baseline = panel_y + if landscape { 52.0 * s } else { 64.0 * s };
                 // Divider between cells.
                 if i > 0 {
                     stroke_line(
                         &mut static_layer,
                         cx,
-                        panel_y + 38.0 * s,
+                        panel_y + if landscape { 30.0 * s } else { 38.0 * s },
                         cx,
-                        panel_y + 162.0 * s,
+                        panel_y + if landscape { 130.0 * s } else { 162.0 * s },
                         2.0 * s,
                         (255, 255, 255, 30),
                     );
                 }
                 // Label icons.
-                let icon_size = 26.0 * s;
+                let icon_size = if landscape { 20.0 * s } else { 26.0 * s };
                 let icon_y = label_baseline - icon_size + 3.0 * s;
                 match kind {
                     MetricKind::HeartRate => {
                         draw_heart(&mut static_layer, text_x, icon_y, icon_size, (229, 57, 53, 255));
-                        text_x += icon_size + 12.0 * s;
+                        text_x += icon_size + 8.0 * s;
                     }
                     MetricKind::ElevGain => {
                         draw_mountain(
@@ -321,7 +355,7 @@ impl OverlayRenderer {
                             icon_size,
                             (255, 255, 255, 215),
                         );
-                        text_x += icon_size + 12.0 * s;
+                        text_x += icon_size + 8.0 * s;
                     }
                     _ => {}
                 }
@@ -333,35 +367,36 @@ impl OverlayRenderer {
                     label_px,
                     LABEL,
                     false,
-                    3.0 * s,
+                    if landscape { 2.0 * s } else { 3.0 * s },
                 );
                 cells.push(Cell {
                     kind,
-                    text_x: cx + 34.0 * s,
-                    value_baseline: panel_y + 152.0 * s,
-                    value_px: 72.0 * s,
-                    unit_px: 30.0 * s,
+                    x: cx,
+                    w: cw,
+                    pad: cell_pad,
+                    unit_inset: UNIT_DIVIDER_GAP * s,
+                    value_baseline: panel_y + if landscape { 124.0 * s } else { 152.0 * s },
+                    value_px,
+                    unit_px,
                 });
             }
         }
 
         // ---- noodle map (top-right) ----
         let map = if tl.has_gps && tl.sport != SportKind::IndoorRun {
-            let size = 340.0 * s;
-            let mx = (DESIGN_W - MARGIN) * s - size;
+            let size = if landscape { 280.0 * s } else { 340.0 * s };
+            let mx = w - MARGIN * s - size;
             let my = MARGIN * s;
             Track::from_gps(&tl.samples, size, size, 26.0 * s).map(|track| {
                 let stroke_w = 5.5 * s;
-                // Shadow + full path into the static layer (offset to map origin).
                 let full = track_path(&track, mx, my);
                 stroke_path_color(
                     &mut static_layer,
                     &full,
-                    stroke_w + 5.5 * s,
+                    stroke_w + 4.0 * s,
                     (0, 0, 0, 80),
                 );
                 stroke_path_color(&mut static_layer, &full, stroke_w, (255, 255, 255, 235));
-                // Start dot.
                 fill_circle(
                     &mut static_layer,
                     mx + track.xs[0],
@@ -503,13 +538,25 @@ impl OverlayRenderer {
             );
         }
 
-        // Metric cells.
+        // Metric cells — value + unit flow left-to-right; clamp so unit ink
+        // never crosses the divider gutter on the right.
         for cell in &self.cells {
             let value = cell.kind.format(snap, self.sport);
-            let vw = self.bold.draw(
+            let unit = cell.kind.unit(self.sport);
+            let left = cell.x + cell.pad;
+            let right_ink_limit = cell.x + cell.w - cell.unit_inset;
+            let (_, unit_ink_w) = self.semi.measure_extents(unit, cell.unit_px, false, 0.0);
+            let (value_w, _) = self.bold.measure_extents(&value, cell.value_px, true, 0.0);
+            let gap = 8.0 * (cell.value_px / 52.0);
+            let mut unit_x = left + value_w + gap;
+            if unit_x + unit_ink_w > right_ink_limit {
+                unit_x = right_ink_limit - unit_ink_w;
+            }
+            let value_x = (unit_x - gap - value_w).max(left);
+            self.bold.draw(
                 &mut self.frame,
                 &value,
-                cell.text_x,
+                value_x,
                 cell.value_baseline,
                 cell.value_px,
                 WHITE,
@@ -518,8 +565,8 @@ impl OverlayRenderer {
             );
             self.semi.draw(
                 &mut self.frame,
-                cell.kind.unit(self.sport),
-                cell.text_x + vw + 10.0 * (cell.value_px / 72.0),
+                unit,
+                unit_x,
                 cell.value_baseline,
                 cell.unit_px,
                 UNIT,
@@ -781,6 +828,195 @@ mod tests {
     use super::*;
 
     #[test]
+    fn landscape_panel_is_compact_bottom_left() {
+        use crate::fit::{Sample, Timeline};
+        use chrono::TimeZone;
+
+        let tl = Timeline {
+            start_utc: chrono::Utc.with_ymd_and_hms(2026, 6, 7, 15, 0, 0).unwrap(),
+            sport: SportKind::OutdoorRun,
+            utc_offset_secs: None,
+            samples: vec![Sample {
+                t: 0.0,
+                hr: Some(120.0),
+                dist: Some(0.0),
+                speed: Some(3.0),
+                lat: Some(47.0),
+                lon: Some(8.0),
+                ..Default::default()
+            }],
+            pauses: vec![],
+            has_gps: true,
+        };
+        let (w, h) = (2752u32, 1530u32);
+        let panel_w = w as f32 * LANDSCAPE_PANEL_WIDTH_FRAC;
+        assert!(panel_w < w as f32 * 0.5);
+        let s = w.min(h) as f32 / DESIGN_W;
+        let panel_h = 160.0 * s;
+        let panel_y = h as f32 - MARGIN * s - panel_h;
+        assert!(panel_y + panel_h <= h as f32);
+        assert!(panel_h < 240.0, "panel too tall: {panel_h}");
+        let _ = OverlayRenderer::new(&tl, w, h, 190.0).unwrap();
+    }
+
+    #[test]
+    fn metric_units_clear_cell_dividers() {
+        use crate::fit::{Sample, Timeline};
+        use chrono::TimeZone;
+
+        fn check(tl: &Timeline, w: u32, h: u32) {
+            let s = w.min(h) as f32 / DESIGN_W;
+            let panel_x = MARGIN * s;
+            let panel_w = if w > h {
+                w as f32 * LANDSCAPE_PANEL_WIDTH_FRAC
+            } else {
+                w as f32 - 2.0 * MARGIN * s
+            };
+            let n = visible_metrics(tl).len().max(1);
+            let cw = panel_w / n as f32;
+            let min_gap = (UNIT_DIVIDER_GAP * s * 0.85).round() as u32;
+            let y0 = if w > h {
+                (h as f32 - MARGIN * s - 160.0 * s + 100.0 * s) as u32
+            } else {
+                (h as f32 - 120.0 * s - 200.0 * s + 128.0 * s) as u32
+            };
+            let y1 = y0 + 40;
+
+            let mut r = OverlayRenderer::new(&tl, w, h, 190.0).unwrap();
+            let snap = tl.snapshot(tl.duration() * 0.62);
+            let mut out = vec![0u8; (w * h * 4) as usize];
+            r.render_frame(&snap, tl.duration() * 0.62, 1.0, &mut out);
+
+            for i in 0..n.saturating_sub(1) {
+                let div = (panel_x + (i as f32 + 1.0) * cw).round() as u32;
+                let x0 = (panel_x + i as f32 * cw).round() as u32;
+                let mut max_x = x0;
+                for y in y0..y1 {
+                    for x in x0..div.saturating_sub(min_gap) {
+                        if out[((y * w + x) * 4 + 3) as usize] > 0 {
+                            max_x = max_x.max(x);
+                        }
+                    }
+                }
+                assert!(
+                    max_x <= div - min_gap,
+                    "{:?} {}x{} cell {i}: ink to {max_x}, divider {div}, need {min_gap}px",
+                    tl.sport,
+                    w,
+                    h
+                );
+            }
+        }
+
+        let base = |sport: SportKind| Timeline {
+            start_utc: chrono::Utc.with_ymd_and_hms(2026, 6, 7, 15, 0, 0).unwrap(),
+            sport,
+            utc_offset_secs: None,
+            samples: vec![Sample {
+                t: 0.0,
+                hr: Some(125.0),
+                dist: Some(9510.0),
+                speed: Some(9.36),
+                power: Some(245.0),
+                cadence: Some(176.0),
+                lat: Some(47.0),
+                lon: Some(8.0),
+                ..Default::default()
+            }],
+            pauses: vec![],
+            has_gps: sport != SportKind::IndoorRun,
+        };
+
+        for sport in [
+            SportKind::OutdoorRun,
+            SportKind::IndoorRun,
+            SportKind::BikeRide,
+            SportKind::Hike,
+        ] {
+            check(&base(sport), 1080, 1920);
+            check(&base(sport), 2752, 1530);
+        }
+    }
+
+    #[test]
+    fn bike_landscape_unit_clears_divider() {
+        use crate::fit::{Sample, Timeline};
+        use chrono::TimeZone;
+
+        let tl = Timeline {
+            start_utc: chrono::Utc.with_ymd_and_hms(2026, 6, 7, 15, 0, 0).unwrap(),
+            sport: SportKind::BikeRide,
+            utc_offset_secs: None,
+            samples: vec![Sample {
+                t: 0.0,
+                hr: Some(125.0),
+                dist: Some(9510.0),
+                speed: Some(9.36),
+                power: Some(245.0),
+                lat: Some(47.0),
+                lon: Some(8.0),
+                ..Default::default()
+            }],
+            pauses: vec![],
+            has_gps: true,
+        };
+        let (w, h) = (2752u32, 1530u32);
+        let s = w.min(h) as f32 / DESIGN_W;
+        let panel_w = w as f32 * LANDSCAPE_PANEL_WIDTH_FRAC;
+        let panel_x = MARGIN * s;
+        let cw = panel_w / 4.0;
+        let divider_x = (panel_x + cw).round() as u32;
+        let gap_px = (UNIT_DIVIDER_GAP * s * 0.85).round() as u32;
+
+        let mut r = OverlayRenderer::new(&tl, w, h, 190.0).unwrap();
+        let snap = tl.snapshot(0.0);
+        let mut out = vec![0u8; (w * h * 4) as usize];
+        r.render_frame(&snap, 0.0, 1.0, &mut out);
+
+        let mut max_unit_x = 0u32;
+        // Scan a band around the value baseline in cell 0 (speed).
+        let y0 = (h as f32 - MARGIN * s - 160.0 * s + 100.0 * s) as u32;
+        let y1 = y0 + 40;
+        for y in y0..y1 {
+            for x in 0..divider_x.saturating_sub(gap_px) {
+                let a = out[((y * w + x) * 4 + 3) as usize];
+                if a > 0 {
+                    max_unit_x = max_unit_x.max(x);
+                }
+            }
+        }
+        assert!(
+            max_unit_x <= divider_x - gap_px,
+            "unit ink reaches x={max_unit_x}, divider at {divider_x}, wanted {gap_px}px gap"
+        );
+    }
+
+    #[test]
+    fn unit_ink_extents_cover_drawn_pixels() {
+        use super::text::GlyphCache;
+        let mut semi = GlyphCache::new(FONT_SEMI);
+        for unit in ["km/h", "/km", "bpm", "km", "W"] {
+            let px = 24.0f32;
+            let (_, ink_w) = semi.measure_extents(unit, px, false, 0.0);
+            let mut pm = Pixmap::new(256, 64).unwrap();
+            semi.draw(&mut pm, unit, 0.0, 48.0, px, [1.0, 1.0, 1.0, 1.0], false, 0.0);
+            let mut max_x = 0u32;
+            let data = pm.data();
+            for y in 0..pm.height() {
+                for x in 0..pm.width() {
+                    if data[((y * pm.width() + x) * 4 + 3) as usize] > 0 {
+                        max_x = max_x.max(x);
+                    }
+                }
+            }
+            assert!(
+                ink_w + 1.0 >= max_x as f32,
+                "{unit}: measured ink {ink_w} < drawn max_x {max_x}"
+            );
+        }
+    }
+
+    #[test]
     fn formats_duration() {
         assert_eq!(fmt_duration(0.0), "00:00");
         assert_eq!(fmt_duration(65.0), "01:05");
@@ -866,21 +1102,14 @@ mod tests {
         }
 
         std::fs::create_dir_all("target/previews").unwrap();
-        for (sport, name) in [
-            (SportKind::OutdoorRun, "outdoor-run"),
-            (SportKind::IndoorRun, "indoor-run"),
-            (SportKind::BikeRide, "bike-ride"),
-            (SportKind::Hike, "hike"),
-        ] {
-            let tl = synth(sport);
-            let (w, h) = (1080u32, 1920u32);
-            let mut r = OverlayRenderer::new(&tl, w, h, 190.0).unwrap();
+
+        fn render_preview(tl: &Timeline, w: u32, h: u32, path: &str) {
+            let mut r = OverlayRenderer::new(tl, w, h, 190.0).unwrap();
             let t = tl.duration() * 0.62;
             let snap = tl.snapshot(t);
             let mut out = vec![0u8; (w * h * 4) as usize];
             r.render_frame(&snap, t, 1.0, &mut out);
 
-            // Composite straight-alpha overlay onto a grey backdrop.
             let mut bg = Pixmap::new(w, h).unwrap();
             bg.fill(Color::from_rgba8(70, 74, 80, 255));
             let data = bg.data_mut();
@@ -894,7 +1123,23 @@ mod tests {
                     d[c] = (px[c] as f32 * a + d[c] as f32 * (1.0 - a)) as u8;
                 }
             }
-            bg.save_png(format!("target/previews/{name}.png")).unwrap();
+            bg.save_png(path).unwrap();
+        }
+
+        for (sport, name) in [
+            (SportKind::OutdoorRun, "outdoor-run"),
+            (SportKind::IndoorRun, "indoor-run"),
+            (SportKind::BikeRide, "bike-ride"),
+            (SportKind::Hike, "hike"),
+        ] {
+            let tl = synth(sport);
+            render_preview(&tl, 1080, 1920, &format!("target/previews/{name}.png"));
+            render_preview(
+                &tl,
+                2752,
+                1530,
+                &format!("target/previews/{name}-landscape.png"),
+            );
         }
     }
 

@@ -136,7 +136,6 @@ mod tests {
     use crate::fit::Sample;
 
     fn gps_samples() -> Vec<Sample> {
-        // A simple north-east diagonal.
         (0..=10)
             .map(|i| Sample {
                 t: i as f64,
@@ -154,15 +153,12 @@ mod tests {
             assert!((0.0..=300.0).contains(&x), "x={x}");
             assert!((0.0..=300.0).contains(&y), "y={y}");
         }
-        // Latitude increases -> screen y decreases (north is up).
         assert!(track.ys.last().unwrap() < track.ys.first().unwrap());
-        // Longitude increases -> x increases.
         assert!(track.xs.last().unwrap() > track.xs.first().unwrap());
     }
 
     #[test]
     fn projection_preserves_aspect() {
-        // 2:1 lon:lat span should not be stretched to fill a square box.
         let samples: Vec<Sample> = (0..=10)
             .map(|i| Sample {
                 t: i as f64,
