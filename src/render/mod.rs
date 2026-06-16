@@ -30,7 +30,7 @@ const MARGIN: f32 = 48.0;
 /// Landscape clips use a compact bottom-left HUD instead of a full-width bar.
 const LANDSCAPE_PANEL_WIDTH_FRAC: f32 = 0.38;
 /// Minimum gap between the rightmost unit ink and the column divider.
-const UNIT_DIVIDER_GAP: f32 = 40.0;
+const UNIT_DIVIDER_GAP: f32 = 20.0;
 
 const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const LABEL: [f32; 4] = [1.0, 1.0, 1.0, 0.72];
@@ -322,7 +322,7 @@ impl OverlayRenderer {
                 52.0 * s,
                 20.0 * s,
                 24.0 * s,
-                30.0 * s,
+                20.0 * s,
             )
         } else {
             (
@@ -332,7 +332,7 @@ impl OverlayRenderer {
                 72.0 * s,
                 24.0 * s,
                 30.0 * s,
-                40.0 * s,
+                25.0 * s,
             )
         };
         let panel_y = h - bottom_gap - panel_h;
@@ -590,7 +590,7 @@ impl OverlayRenderer {
             let gap = 8.0 * (cell.value_px / 52.0);
             let mut unit_x = left + value_w + gap;
             if unit_x + unit_ink_w > right_ink_limit {
-                unit_x = right_ink_limit - unit_ink_w;
+                unit_x = (right_ink_limit - unit_ink_w).max(left + value_w + gap);
             }
             let value_x = (unit_x - gap - value_w).max(left);
             self.bold.draw(
@@ -1067,93 +1067,99 @@ mod tests {
         assert_eq!(fmt_thousands(-1234567), "-1,234,567");
     }
 
+    fn synth(sport: SportKind) -> crate::fit::Timeline {
+        use crate::fit::Sample;
+        use chrono::TimeZone;
+        let n = 1800usize; // 30 minutes at 1 Hz
+        let gps = sport != SportKind::IndoorRun;
+        let mut dist = 0.0f64;
+        let mut samples: Vec<Sample> = (0..n)
+            .map(|i| {
+                let t = i as f64;
+                let a = t / n as f64 * std::f64::consts::TAU;
+                let speed = match sport {
+                    SportKind::BikeRide => 8.5 + 1.5 * (a * 5.0).sin(),
+                    SportKind::Hike => 1.4 + 0.2 * (a * 7.0).sin(),
+                    _ => 3.3 + 0.4 * (a * 5.0).sin(),
+                };
+                dist += speed;
+                Sample {
+                    t,
+                    lat: gps.then(|| 47.0 + 0.004 * (a.sin() + 0.3 * (3.0 * a).sin())),
+                    lon: gps.then(|| 8.0 + 0.004 * (a.cos() + 0.3 * (2.0 * a).cos())),
+                    hr: Some(140.0 + 20.0 * (a * 3.0).sin()),
+                    speed: Some(speed),
+                    speed_smooth: Some(speed),
+                    dist: Some(dist),
+                    alt: Some(520.0 + 150.0 * (a / 2.0).sin() + 8.0 * (a * 9.0).sin()),
+                    cadence: Some(if sport == SportKind::BikeRide { 92.0 } else { 88.0 }),
+                    power: (sport == SportKind::BikeRide).then_some(245.0),
+                    ascent: 0.0,
+                }
+            })
+            .collect();
+        let mut gain = 0.0;
+        for i in 1..n {
+            let d = samples[i].alt.unwrap() - samples[i - 1].alt.unwrap();
+            if d > 0.0 {
+                gain += d;
+            }
+            samples[i].ascent = gain;
+        }
+        crate::fit::Timeline {
+            start_utc: chrono::Utc.with_ymd_and_hms(2026, 6, 7, 15, 9, 53).unwrap(),
+            sport,
+            utc_offset_secs: Some(7200),
+            samples,
+            pauses: vec![],
+            has_gps: gps,
+        }
+    }
+
+    fn render_preview_with_overrides(
+        tl: &crate::fit::Timeline,
+        w: u32,
+        h: u32,
+        path: &str,
+        overrides: &crate::layout::LayoutOverrides,
+    ) {
+        let mut r = OverlayRenderer::new(
+            tl,
+            w,
+            h,
+            190.0,
+            &LayoutConfig::resolve(tl, overrides, 190.0),
+        )
+        .unwrap();
+        let t = tl.duration() * 0.62;
+        let snap = tl.snapshot(t);
+        let mut out = vec![0u8; (w * h * 4) as usize];
+        r.render_frame(&snap, t, 1.0, &mut out);
+
+        let mut bg = Pixmap::new(w, h).unwrap();
+        bg.fill(Color::from_rgba8(70, 74, 80, 255));
+        let data = bg.data_mut();
+        for (i, px) in out.chunks_exact(4).enumerate() {
+            let a = px[3] as f32 / 255.0;
+            if a == 0.0 {
+                continue;
+            }
+            let d = &mut data[i * 4..i * 4 + 4];
+            for c in 0..3 {
+                d[c] = (px[c] as f32 * a + d[c] as f32 * (1.0 - a)) as u8;
+            }
+        }
+        bg.save_png(path).unwrap();
+    }
+
     /// Visual smoke test: renders one frame per sport layout to
     /// target/previews/*.png over a grey backdrop. Run with:
     /// `cargo test render_layout_previews -- --ignored`
     #[test]
     #[ignore]
     fn render_layout_previews() {
-        use crate::fit::{Sample, Timeline};
-        use chrono::TimeZone;
-
-        fn synth(sport: SportKind) -> Timeline {
-            let n = 1800usize; // 30 minutes at 1 Hz
-            let gps = sport != SportKind::IndoorRun;
-            let mut dist = 0.0f64;
-            let mut samples: Vec<Sample> = (0..n)
-                .map(|i| {
-                    let t = i as f64;
-                    let a = t / n as f64 * std::f64::consts::TAU;
-                    let speed = match sport {
-                        SportKind::BikeRide => 8.5 + 1.5 * (a * 5.0).sin(),
-                        SportKind::Hike => 1.4 + 0.2 * (a * 7.0).sin(),
-                        _ => 3.3 + 0.4 * (a * 5.0).sin(),
-                    };
-                    dist += speed;
-                    Sample {
-                        t,
-                        lat: gps.then(|| 47.0 + 0.004 * (a.sin() + 0.3 * (3.0 * a).sin())),
-                        lon: gps.then(|| 8.0 + 0.004 * (a.cos() + 0.3 * (2.0 * a).cos())),
-                        hr: Some(140.0 + 20.0 * (a * 3.0).sin()),
-                        speed: Some(speed),
-                        speed_smooth: Some(speed),
-                        dist: Some(dist),
-                        alt: Some(520.0 + 150.0 * (a / 2.0).sin() + 8.0 * (a * 9.0).sin()),
-                        cadence: Some(if sport == SportKind::BikeRide { 92.0 } else { 88.0 }),
-                        power: (sport == SportKind::BikeRide).then_some(245.0),
-                        ascent: 0.0,
-                    }
-                })
-                .collect();
-            let mut gain = 0.0;
-            for i in 1..n {
-                let d = samples[i].alt.unwrap() - samples[i - 1].alt.unwrap();
-                if d > 0.0 {
-                    gain += d;
-                }
-                samples[i].ascent = gain;
-            }
-            Timeline {
-                start_utc: chrono::Utc.with_ymd_and_hms(2026, 6, 7, 15, 9, 53).unwrap(),
-                sport,
-                utc_offset_secs: Some(7200),
-                samples,
-                pauses: vec![],
-                has_gps: gps,
-            }
-        }
-
         std::fs::create_dir_all("target/previews").unwrap();
-
-        fn render_preview(tl: &Timeline, w: u32, h: u32, path: &str) {
-            let mut r = OverlayRenderer::new(
-                tl,
-                w,
-                h,
-                190.0,
-                &LayoutConfig::resolve(tl, &Default::default(), 190.0),
-            )
-            .unwrap();
-            let t = tl.duration() * 0.62;
-            let snap = tl.snapshot(t);
-            let mut out = vec![0u8; (w * h * 4) as usize];
-            r.render_frame(&snap, t, 1.0, &mut out);
-
-            let mut bg = Pixmap::new(w, h).unwrap();
-            bg.fill(Color::from_rgba8(70, 74, 80, 255));
-            let data = bg.data_mut();
-            for (i, px) in out.chunks_exact(4).enumerate() {
-                let a = px[3] as f32 / 255.0;
-                if a == 0.0 {
-                    continue;
-                }
-                let d = &mut data[i * 4..i * 4 + 4];
-                for c in 0..3 {
-                    d[c] = (px[c] as f32 * a + d[c] as f32 * (1.0 - a)) as u8;
-                }
-            }
-            bg.save_png(path).unwrap();
-        }
+        let overrides = crate::layout::LayoutOverrides::default();
 
         for (sport, name) in [
             (SportKind::OutdoorRun, "outdoor-run"),
@@ -1162,14 +1168,81 @@ mod tests {
             (SportKind::Hike, "hike"),
         ] {
             let tl = synth(sport);
-            render_preview(&tl, 1080, 1920, &format!("target/previews/{name}.png"));
-            render_preview(
+            render_preview_with_overrides(&tl, 1080, 1920, &format!("target/previews/{name}.png"), &overrides);
+            render_preview_with_overrides(
                 &tl,
                 2752,
                 1530,
                 &format!("target/previews/{name}-landscape.png"),
+                &overrides,
             );
         }
+    }
+
+    /// Generate custom layout previews for documentation.
+    #[test]
+    #[ignore]
+    fn render_custom_layout_previews() {
+        use crate::layout::{LayoutOverrides, MetricId, WidgetId};
+        std::fs::create_dir_all("target/previews").unwrap();
+
+        // 1. Outdoor run: custom metrics
+        let tl = synth(SportKind::OutdoorRun);
+        render_preview_with_overrides(
+            &tl,
+            1080,
+            1920,
+            "target/previews/style-outdoor-run-custom-metrics.png",
+            &LayoutOverrides {
+                metrics: Some(vec![MetricId::Distance, MetricId::Pace, MetricId::HeartRate]),
+                ..Default::default()
+            },
+        );
+
+        // 2. Outdoor run: with HR zones
+        render_preview_with_overrides(
+            &tl,
+            1080,
+            1920,
+            "target/previews/style-outdoor-run-hr-zones.png",
+            &LayoutOverrides {
+                enable_widgets: vec![WidgetId::HrZones],
+                ..Default::default()
+            },
+        );
+
+        // 3. Bike: with elevation
+        let tl_bike = synth(SportKind::BikeRide);
+        render_preview_with_overrides(
+            &tl_bike,
+            1080,
+            1920,
+            "target/previews/style-bike-elevation.png",
+            &LayoutOverrides {
+                enable_widgets: vec![WidgetId::Elevation],
+                ..Default::default()
+            },
+        );
+
+        // 4. Hike: minimal
+        let tl_hike = synth(SportKind::Hike);
+        render_preview_with_overrides(
+            &tl_hike,
+            1080,
+            1920,
+            "target/previews/style-hike-minimal.png",
+            &LayoutOverrides {
+                widgets: Some(crate::layout::WidgetSet {
+                    time_chip: true,
+                    metrics_panel: true,
+                    map: false,
+                    elevation: false,
+                    hr_zones: false,
+                }),
+                metrics: Some(vec![MetricId::Distance, MetricId::Altitude]),
+                ..Default::default()
+            },
+        );
     }
 
     #[test]

@@ -774,8 +774,8 @@ Keeping resolution pure (`Timeline + Overrides → LayoutConfig`) means a future
 
 ### Milestone 4 — Custom layout previews & docs
 
-- [ ] Custom preview test + `assets/` PNGs
-- [ ] README examples
+- [x] Custom preview test + `assets/` PNGs
+- [x] README examples
 - [ ] Manual QA videos
 
 ### Milestone 5 — Polish
