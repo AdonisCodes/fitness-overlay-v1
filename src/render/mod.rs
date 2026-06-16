@@ -11,6 +11,7 @@ pub mod map;
 pub mod text;
 
 use crate::fit::{Snapshot, SportKind, Timeline};
+use crate::layout::{LayoutConfig, MetricId};
 use anyhow::{Context, Result};
 use map::Track;
 use text::GlyphCache;
@@ -123,6 +124,21 @@ impl MetricKind {
                 .alt
                 .map(|v| fmt_thousands(v.round() as i64))
                 .unwrap_or_else(|| "--".to_string()),
+        }
+    }
+}
+
+impl MetricKind {
+    pub fn from_id(id: MetricId) -> Self {
+        match id {
+            MetricId::Pace => MetricKind::Pace,
+            MetricId::Speed => MetricKind::Speed,
+            MetricId::HeartRate => MetricKind::HeartRate,
+            MetricId::Distance => MetricKind::Distance,
+            MetricId::Cadence => MetricKind::Cadence,
+            MetricId::Power => MetricKind::Power,
+            MetricId::ElevGain => MetricKind::ElevGain,
+            MetricId::Altitude => MetricKind::Altitude,
         }
     }
 }
@@ -245,7 +261,13 @@ pub struct OverlayRenderer {
 }
 
 impl OverlayRenderer {
-    pub fn new(tl: &Timeline, width: u32, height: u32, max_hr: f64) -> Result<OverlayRenderer> {
+    pub fn new(
+        tl: &Timeline,
+        width: u32,
+        height: u32,
+        max_hr: f64,
+        layout: &LayoutConfig,
+    ) -> Result<OverlayRenderer> {
         let w = width as f32;
         let h = height as f32;
         let landscape = w > h;
@@ -285,7 +307,11 @@ impl OverlayRenderer {
         };
 
         // ---- bottom metric panel ----
-        let kinds = visible_metrics(tl);
+        let kinds: Vec<MetricKind> = layout
+            .metrics
+            .iter()
+            .map(|&m| MetricKind::from_id(m))
+            .collect();
         let bottom_gap = if landscape { MARGIN * s } else { 120.0 * s };
         let (panel_x, panel_w, panel_h, value_px, label_px, unit_px, cell_pad) = if landscape {
             let panel_w = w * LANDSCAPE_PANEL_WIDTH_FRAC;
@@ -383,7 +409,7 @@ impl OverlayRenderer {
         }
 
         // ---- noodle map (top-right) ----
-        let map = if tl.has_gps && tl.sport != SportKind::IndoorRun {
+        let map = if layout.widgets.map {
             let size = if landscape { 280.0 * s } else { 340.0 * s };
             let mx = w - MARGIN * s - size;
             let my = MARGIN * s;
@@ -422,10 +448,16 @@ impl OverlayRenderer {
             None
         };
 
-        // ---- elevation profile (hike) ----
-        let elev = if tl.sport == SportKind::Hike && tl.has_field(|smp| smp.alt.is_some()) {
+        // ---- elevation profile ----
+        let elev = if layout.widgets.elevation {
             let eh = 120.0 * s;
-            let ey = panel_y - eh - 16.0 * s;
+            // If metrics panel is hidden, anchor to bottom gap.
+            let anchor_y = if layout.widgets.metrics_panel {
+                panel_y
+            } else {
+                h - bottom_gap
+            };
+            let ey = anchor_y - eh - 16.0 * s;
             let pad = 18.0 * s;
             let inner_w = panel_w - 2.0 * pad;
             let inner_h = eh - 2.0 * pad;
@@ -458,10 +490,18 @@ impl OverlayRenderer {
             None
         };
 
-        // ---- HR zone bar (indoor) ----
-        let zone = if tl.sport == SportKind::IndoorRun && tl.has_field(|smp| smp.hr.is_some()) {
+        // ---- HR zone bar ----
+        let zone = if layout.widgets.hr_zones {
             let zh = 24.0 * s;
-            let zy = panel_y - zh - 24.0 * s;
+            // If metrics panel is hidden, anchor to bottom gap.
+            // If elevation is also visible, stack above it?
+            // Spec says "above metrics". For now, anchor to metrics or bottom gap.
+            let anchor_y = if layout.widgets.metrics_panel {
+                panel_y
+            } else {
+                h - bottom_gap
+            };
+            let zy = anchor_y - zh - 24.0 * s;
             let gap = 6.0 * s;
             let seg_w = (panel_w - 4.0 * gap) / 5.0;
             for (i, &(r, g, b)) in ZONE_COLORS.iter().enumerate() {
@@ -634,41 +674,6 @@ impl OverlayRenderer {
     }
 }
 
-/// Sport-specific metric row, filtered down to data present in the file.
-fn visible_metrics(tl: &Timeline) -> Vec<MetricKind> {
-    let wanted: &[MetricKind] = match tl.sport {
-        SportKind::OutdoorRun | SportKind::IndoorRun => &[
-            MetricKind::Pace,
-            MetricKind::HeartRate,
-            MetricKind::Distance,
-            MetricKind::Cadence,
-        ],
-        SportKind::BikeRide => &[
-            MetricKind::Speed,
-            MetricKind::Power,
-            MetricKind::HeartRate,
-            MetricKind::Distance,
-        ],
-        SportKind::Hike => &[
-            MetricKind::Distance,
-            MetricKind::ElevGain,
-            MetricKind::HeartRate,
-            MetricKind::Altitude,
-        ],
-    };
-    wanted
-        .iter()
-        .copied()
-        .filter(|k| match k {
-            MetricKind::Pace | MetricKind::Speed => tl.has_field(|s| s.speed.is_some()),
-            MetricKind::HeartRate => tl.has_field(|s| s.hr.is_some()),
-            MetricKind::Distance => tl.has_field(|s| s.dist.is_some()),
-            MetricKind::Cadence => tl.has_field(|s| s.cadence.map(|c| c > 0.0).unwrap_or(false)),
-            MetricKind::Power => tl.has_field(|s| s.power.is_some()),
-            MetricKind::ElevGain | MetricKind::Altitude => tl.has_field(|s| s.alt.is_some()),
-        })
-        .collect()
-}
 
 // ---------------------------------------------------------------------------
 // Drawing helpers
@@ -823,6 +828,8 @@ pub fn write_rgba_straight(pixmap: &Pixmap, fade: f32, out: &mut [u8]) {
     }
 }
 
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -856,7 +863,14 @@ mod tests {
         let panel_y = h as f32 - MARGIN * s - panel_h;
         assert!(panel_y + panel_h <= h as f32);
         assert!(panel_h < 240.0, "panel too tall: {panel_h}");
-        let _ = OverlayRenderer::new(&tl, w, h, 190.0).unwrap();
+        let _ = OverlayRenderer::new(
+            &tl,
+            w,
+            h,
+            190.0,
+            &LayoutConfig::resolve(&tl, &Default::default(), 190.0),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -872,7 +886,8 @@ mod tests {
             } else {
                 w as f32 - 2.0 * MARGIN * s
             };
-            let n = visible_metrics(tl).len().max(1);
+            let layout = LayoutConfig::resolve(tl, &Default::default(), 190.0);
+            let n = layout.metrics.len().max(1);
             let cw = panel_w / n as f32;
             let min_gap = (UNIT_DIVIDER_GAP * s * 0.85).round() as u32;
             let y0 = if w > h {
@@ -882,7 +897,7 @@ mod tests {
             };
             let y1 = y0 + 40;
 
-            let mut r = OverlayRenderer::new(&tl, w, h, 190.0).unwrap();
+            let mut r = OverlayRenderer::new(&tl, w, h, 190.0, &layout).unwrap();
             let snap = tl.snapshot(tl.duration() * 0.62);
             let mut out = vec![0u8; (w * h * 4) as usize];
             r.render_frame(&snap, tl.duration() * 0.62, 1.0, &mut out);
@@ -968,7 +983,14 @@ mod tests {
         let divider_x = (panel_x + cw).round() as u32;
         let gap_px = (UNIT_DIVIDER_GAP * s * 0.85).round() as u32;
 
-        let mut r = OverlayRenderer::new(&tl, w, h, 190.0).unwrap();
+        let mut r = OverlayRenderer::new(
+            &tl,
+            w,
+            h,
+            190.0,
+            &LayoutConfig::resolve(&tl, &Default::default(), 190.0),
+        )
+        .unwrap();
         let snap = tl.snapshot(0.0);
         let mut out = vec![0u8; (w * h * 4) as usize];
         r.render_frame(&snap, 0.0, 1.0, &mut out);
@@ -1104,7 +1126,14 @@ mod tests {
         std::fs::create_dir_all("target/previews").unwrap();
 
         fn render_preview(tl: &Timeline, w: u32, h: u32, path: &str) {
-            let mut r = OverlayRenderer::new(tl, w, h, 190.0).unwrap();
+            let mut r = OverlayRenderer::new(
+                tl,
+                w,
+                h,
+                190.0,
+                &LayoutConfig::resolve(tl, &Default::default(), 190.0),
+            )
+            .unwrap();
             let t = tl.duration() * 0.62;
             let snap = tl.snapshot(t);
             let mut out = vec![0u8; (w * h * 4) as usize];

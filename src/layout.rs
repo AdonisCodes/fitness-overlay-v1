@@ -45,6 +45,58 @@ pub struct LayoutOverrides {
     pub enable_widgets: Vec<WidgetId>,
 }
 
+impl LayoutOverrides {
+    /// Build overrides from raw CLI strings.
+    pub fn from_parts(
+        metrics: Option<Vec<String>>,
+        widgets: Option<Vec<String>>,
+        enable: Vec<String>,
+        disable: Vec<String>,
+    ) -> Result<Self, ParseError> {
+        let metrics = if let Some(m) = metrics {
+            let mut ids = Vec::new();
+            for s in m {
+                ids.extend(MetricId::parse_list(&s)?);
+            }
+            Some(ids)
+        } else {
+            None
+        };
+
+        let widgets = if let Some(w) = widgets {
+            let mut set = WidgetSet::none();
+            for s in w {
+                let subset = WidgetId::parse_list(&s)?;
+                if subset.time_chip { set.time_chip = true; }
+                if subset.metrics_panel { set.metrics_panel = true; }
+                if subset.map { set.map = true; }
+                if subset.elevation { set.elevation = true; }
+                if subset.hr_zones { set.hr_zones = true; }
+            }
+            Some(set)
+        } else {
+            None
+        };
+
+        let mut enable_ids = Vec::new();
+        for s in enable {
+            enable_ids.push(WidgetId::parse_token(&s)?);
+        }
+
+        let mut disable_ids = Vec::new();
+        for s in disable {
+            disable_ids.push(WidgetId::parse_token(&s)?);
+        }
+
+        Ok(Self {
+            metrics,
+            widgets,
+            enable_widgets: enable_ids,
+            disable_widgets: disable_ids,
+        })
+    }
+}
+
 /// Fully resolved layout for one activity.
 #[derive(Debug, Clone)]
 pub struct LayoutConfig {

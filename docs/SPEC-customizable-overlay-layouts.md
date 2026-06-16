@@ -762,15 +762,15 @@ Keeping resolution pure (`Timeline + Overrides → LayoutConfig`) means a future
 
 ### Milestone 2 — Wire renderer
 
-- [ ] `OverlayRenderer::new` takes `&LayoutConfig`
-- [ ] Replace `visible_metrics` / widget `if`s
-- [ ] Default path pixel-identical (compare preview PNG hash)
+- [x] `OverlayRenderer::new` takes `&LayoutConfig`
+- [x] Replace `visible_metrics` / widget `if`s
+- [x] Default path pixel-identical (compare preview PNG hash)
 
 ### Milestone 3 — CLI
 
-- [ ] Add flags to `Cli`
-- [ ] `from_cli` parsing + validation tests
-- [ ] Warning output in `main`
+- [x] Add flags to `Cli`
+- [x] `from_cli` (renamed to `from_parts`) parsing + validation tests
+- [x] Warning output in `main`
 
 ### Milestone 4 — Custom layout previews & docs
 
