@@ -300,19 +300,17 @@ fn build_timeline(records: &[FitDataRecord]) -> Result<Timeline> {
                     _ => {}
                 }
             }
-            MesgNum::Activity => {
-                if utc_offset_secs.is_none() {
-                    let local = match field(rec, "local_timestamp") {
-                        Some(Value::Timestamp(dt)) => Some(fit_local_naive(dt)),
-                        _ => None,
-                    };
-                    let ts = utc_field(rec, "timestamp");
-                    if let (Some(local), Some(ts)) = (local, ts) {
-                        let offset = (local - ts.naive_utc()).num_seconds();
-                        // Sanity bound: ±18h, rounded to nearest minute.
-                        if offset.abs() <= 18 * 3600 {
-                            utc_offset_secs = Some((offset as f64 / 60.0).round() as i64 * 60);
-                        }
+            MesgNum::Activity if utc_offset_secs.is_none() => {
+                let local = match field(rec, "local_timestamp") {
+                    Some(Value::Timestamp(dt)) => Some(fit_local_naive(dt)),
+                    _ => None,
+                };
+                let ts = utc_field(rec, "timestamp");
+                if let (Some(local), Some(ts)) = (local, ts) {
+                    let offset = (local - ts.naive_utc()).num_seconds();
+                    // Sanity bound: ±18h, rounded to nearest minute.
+                    if offset.abs() <= 18 * 3600 {
+                        utc_offset_secs = Some((offset as f64 / 60.0).round() as i64 * 60);
                     }
                 }
             }
@@ -343,13 +341,11 @@ fn build_timeline(records: &[FitDataRecord]) -> Result<Timeline> {
     timer_events.sort_by_key(|(ts, _)| *ts);
     for (ts, is_start) in timer_events {
         let t = (ts - start_utc).num_milliseconds() as f64 / 1000.0;
-        if is_start {
-            if let Some(s) = stop_at.take() {
-                if t > s + 0.5 {
-                    pauses.push((s, t));
-                }
+        if is_start && let Some(s) = stop_at.take() {
+            if t > s + 0.5 {
+                pauses.push((s, t));
             }
-        } else if stop_at.is_none() {
+        } else if !is_start && stop_at.is_none() {
             stop_at = Some(t);
         }
     }

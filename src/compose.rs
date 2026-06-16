@@ -48,17 +48,11 @@ pub fn encoder_args(pref: EncoderPref) -> Vec<&'static str> {
 }
 
 /// Options controlling how overlay frames are generated and muxed.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct ComposeOptions {
     /// When set, generate and pipe overlay frames at this rate instead of every
     /// source frame. Output video is also encoded at this rate (fast preview).
     pub preview_fps: Option<f64>,
-}
-
-impl Default for ComposeOptions {
-    fn default() -> Self {
-        Self { preview_fps: None }
-    }
 }
 
 /// Composite overlay frames produced by `frame_fn` onto `video`, writing the

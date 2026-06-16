@@ -105,7 +105,7 @@ impl MetricKind {
                 .unwrap_or_else(|| "--".to_string()),
             MetricKind::Distance => snap
                 .dist
-                .map(|m| fmt_distance_km(m))
+                .map(fmt_distance_km)
                 .unwrap_or_else(|| "--".to_string()),
             MetricKind::Cadence => snap
                 .cadence
@@ -183,7 +183,7 @@ pub fn fmt_thousands(v: i64) -> String {
     let digits = v.abs().to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -337,7 +337,7 @@ impl OverlayRenderer {
         };
         let panel_y = h - bottom_gap - panel_h;
         let mut cells = Vec::new();
-        if !kinds.is_empty() {
+        if layout.widgets.metrics_panel && !kinds.is_empty() {
             fill_rrect(
                 &mut static_layer,
                 panel_x,
@@ -448,16 +448,38 @@ impl OverlayRenderer {
             None
         };
 
+        let mut next_y = if layout.widgets.metrics_panel {
+            panel_y
+        } else {
+            h - bottom_gap
+        } - 16.0 * s;
+
+        // ---- HR zone bar ----
+        let zone = if layout.widgets.hr_zones {
+            let zh = 24.0 * s;
+            let zy = next_y - zh;
+            let gap = 6.0 * s;
+            let seg_w = (panel_w - 4.0 * gap) / 5.0;
+            for (i, &(r, g, b)) in ZONE_COLORS.iter().enumerate() {
+                let zx = panel_x + i as f32 * (seg_w + gap);
+                fill_rrect(&mut static_layer, zx, zy, seg_w, zh, zh / 2.0, (r, g, b, 217));
+            }
+            next_y = zy - 12.0 * s; // Move up for the next widget
+            Some(ZoneWidget {
+                x: panel_x,
+                y: zy,
+                w: panel_w,
+                h: zh,
+                marker_r: 11.0 * s,
+            })
+        } else {
+            None
+        };
+
         // ---- elevation profile ----
         let elev = if layout.widgets.elevation {
             let eh = 120.0 * s;
-            // If metrics panel is hidden, anchor to bottom gap.
-            let anchor_y = if layout.widgets.metrics_panel {
-                panel_y
-            } else {
-                h - bottom_gap
-            };
-            let ey = anchor_y - eh - 16.0 * s;
+            let ey = next_y - eh;
             let pad = 18.0 * s;
             let inner_w = panel_w - 2.0 * pad;
             let inner_h = eh - 2.0 * pad;
@@ -485,35 +507,6 @@ impl OverlayRenderer {
                     track,
                     dot_r: 7.0 * s,
                 }
-            })
-        } else {
-            None
-        };
-
-        // ---- HR zone bar ----
-        let zone = if layout.widgets.hr_zones {
-            let zh = 24.0 * s;
-            // If metrics panel is hidden, anchor to bottom gap.
-            // If elevation is also visible, stack above it?
-            // Spec says "above metrics". For now, anchor to metrics or bottom gap.
-            let anchor_y = if layout.widgets.metrics_panel {
-                panel_y
-            } else {
-                h - bottom_gap
-            };
-            let zy = anchor_y - zh - 24.0 * s;
-            let gap = 6.0 * s;
-            let seg_w = (panel_w - 4.0 * gap) / 5.0;
-            for (i, &(r, g, b)) in ZONE_COLORS.iter().enumerate() {
-                let zx = panel_x + i as f32 * (seg_w + gap);
-                fill_rrect(&mut static_layer, zx, zy, seg_w, zh, zh / 2.0, (r, g, b, 217));
-            }
-            Some(ZoneWidget {
-                x: panel_x,
-                y: zy,
-                w: panel_w,
-                h: zh,
-                marker_r: 11.0 * s,
             })
         } else {
             None
@@ -660,14 +653,14 @@ impl OverlayRenderer {
         }
 
         // HR zone marker.
-        if let Some(z) = &self.zone {
-            if let Some(hr) = snap.hr {
-                let frac = (((hr / self.max_hr) - 0.5) / 0.5).clamp(0.0, 1.0) as f32;
-                let cx = z.x + frac * z.w;
-                let cy = z.y + z.h / 2.0;
-                fill_circle(&mut self.frame, cx, cy, z.marker_r, (255, 255, 255, 255));
-                stroke_circle(&mut self.frame, cx, cy, z.marker_r, 3.0, (0, 0, 0, 70));
-            }
+        if let Some(z) = &self.zone
+            && let Some(hr) = snap.hr
+        {
+            let frac = (((hr / self.max_hr) - 0.5) / 0.5).clamp(0.0, 1.0) as f32;
+            let cx = z.x + frac * z.w;
+            let cy = z.y + z.h / 2.0;
+            fill_circle(&mut self.frame, cx, cy, z.marker_r, (255, 255, 255, 255));
+            stroke_circle(&mut self.frame, cx, cy, z.marker_r, 3.0, (0, 0, 0, 70));
         }
 
         write_rgba_straight(&self.frame, fade, out);
@@ -1240,6 +1233,24 @@ mod tests {
                     hr_zones: false,
                 }),
                 metrics: Some(vec![MetricId::Distance, MetricId::Altitude]),
+                ..Default::default()
+            },
+        );
+
+        // 5. Edge case: metrics off, elevation + HR zones on
+        render_preview_with_overrides(
+            &tl_bike,
+            1080,
+            1920,
+            "target/previews/edge-case-no-metrics.png",
+            &LayoutOverrides {
+                widgets: Some(crate::layout::WidgetSet {
+                    time_chip: true,
+                    metrics_panel: false,
+                    map: true,
+                    elevation: true,
+                    hr_zones: true,
+                }),
                 ..Default::default()
             },
         );

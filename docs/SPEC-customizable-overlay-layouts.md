@@ -780,9 +780,9 @@ Keeping resolution pure (`Timeline + Overrides → LayoutConfig`) means a future
 
 ### Milestone 5 — Polish
 
-- [ ] Edge cases (metrics panel off + elevation on)
-- [ ] CLI help text (`--help` reads well)
-- [ ] Final `cargo test` + `cargo clippy` if used
+- [x] Edge cases (metrics panel off + elevation on)
+- [x] CLI help text (`--help` reads well)
+- [x] Final `cargo test` + `cargo clippy` if used
 
 ---
 
