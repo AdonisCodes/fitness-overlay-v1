@@ -756,9 +756,9 @@ Keeping resolution pure (`Timeline + Overrides → LayoutConfig`) means a future
 
 ### Milestone 1 — Config layer (no visual change)
 
-- [ ] Add `src/layout.rs` with defaults matching current behavior
-- [ ] Add `LayoutConfig::resolve` + unit tests
-- [ ] `cargo test` green
+- [x] Add `src/layout.rs` with defaults matching current behavior
+- [x] Add `LayoutConfig::resolve` + unit tests
+- [x] `cargo test` green
 
 ### Milestone 2 — Wire renderer
 

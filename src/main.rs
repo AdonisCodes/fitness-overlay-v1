@@ -1,5 +1,6 @@
 mod compose;
 mod fit;
+mod layout;
 mod render;
 mod video;
 
