@@ -1,5 +1,7 @@
 # fitoverlay
 
+fix misalignment between layout and generated image for indoor runs (like the gap between text).
+
 Burns a fitness HUD overlay — transparent "noodle map", heart rate, pace/speed,
 distance and more — directly onto Insta360 vertical videos, driven by the
 `.fit` activity file recorded by your watch or bike computer.
