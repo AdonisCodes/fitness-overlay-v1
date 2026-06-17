@@ -52,11 +52,17 @@ impl LayoutOverrides {
         widgets: Option<Vec<String>>,
         enable: Vec<String>,
         disable: Vec<String>,
-    ) -> Result<Self, ParseError> {
+        warnings: &mut Vec<String>,
+    ) -> Self {
         let metrics = if let Some(m) = metrics {
             let mut ids = Vec::new();
             for s in m {
-                ids.extend(MetricId::parse_list(&s)?);
+                for token in s.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+                    match MetricId::parse_token(token) {
+                        Ok(id) => ids.push(id),
+                        Err(e) => warnings.push(e.to_string()),
+                    }
+                }
             }
             Some(ids)
         } else {
@@ -65,35 +71,49 @@ impl LayoutOverrides {
 
         let widgets = if let Some(w) = widgets {
             let mut set = WidgetSet::none();
+            let mut any_valid = false;
             for s in w {
-                let subset = WidgetId::parse_list(&s)?;
-                if subset.time_chip { set.time_chip = true; }
-                if subset.metrics_panel { set.metrics_panel = true; }
-                if subset.map { set.map = true; }
-                if subset.elevation { set.elevation = true; }
-                if subset.hr_zones { set.hr_zones = true; }
+                for token in s.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+                    match WidgetId::parse_token(token) {
+                        Ok(id) => {
+                            set.enable(id);
+                            any_valid = true;
+                        }
+                        Err(e) => warnings.push(e.to_string()),
+                    }
+                }
             }
-            Some(set)
+            if any_valid {
+                Some(set)
+            } else {
+                None
+            }
         } else {
             None
         };
 
         let mut enable_ids = Vec::new();
         for s in enable {
-            enable_ids.push(WidgetId::parse_token(&s)?);
+            match WidgetId::parse_token(&s) {
+                Ok(id) => enable_ids.push(id),
+                Err(e) => warnings.push(e.to_string()),
+            }
         }
 
         let mut disable_ids = Vec::new();
         for s in disable {
-            disable_ids.push(WidgetId::parse_token(&s)?);
+            match WidgetId::parse_token(&s) {
+                Ok(id) => disable_ids.push(id),
+                Err(e) => warnings.push(e.to_string()),
+            }
         }
 
-        Ok(Self {
+        Self {
             metrics,
             widgets,
             enable_widgets: enable_ids,
             disable_widgets: disable_ids,
-        })
+        }
     }
 }
 
@@ -223,17 +243,6 @@ impl MetricId {
         }
     }
 
-    /// Parse a comma-separated metric list. Empty input is an error.
-    pub fn parse_list(s: &str) -> Result<Vec<MetricId>, ParseError> {
-        let tokens: Vec<&str> = s.split(',').map(str::trim).filter(|t| !t.is_empty()).collect();
-        if tokens.is_empty() {
-            return Err(ParseError {
-                token: String::new(),
-                kind: ParseKind::Metric,
-            });
-        }
-        tokens.iter().map(|t| Self::parse_token(t)).collect()
-    }
 
     pub fn label(&self) -> &'static str {
         match self {
@@ -264,21 +273,6 @@ impl WidgetId {
         }
     }
 
-    /// Parse a comma-separated widget list into a set. Empty input is an error.
-    pub fn parse_list(s: &str) -> Result<WidgetSet, ParseError> {
-        let tokens: Vec<&str> = s.split(',').map(str::trim).filter(|t| !t.is_empty()).collect();
-        if tokens.is_empty() {
-            return Err(ParseError {
-                token: String::new(),
-                kind: ParseKind::Widget,
-            });
-        }
-        let mut set = WidgetSet::none();
-        for token in tokens {
-            set.enable(WidgetId::parse_token(token)?);
-        }
-        Ok(set)
-    }
 
     pub fn label(&self) -> &'static str {
         match self {
@@ -554,11 +548,35 @@ mod tests {
 
     #[test]
     fn parse_metrics_case_insensitive() {
-        let ids = MetricId::parse_list("Pace,HR,Distance").unwrap();
+        let mut warnings = Vec::new();
+        let ov = LayoutOverrides::from_parts(
+            Some(vec!["Pace,HR,Distance".to_string()]),
+            None,
+            vec![],
+            vec![],
+            &mut warnings,
+        );
+        let ids = ov.metrics.unwrap();
         assert_eq!(
             ids,
             vec![MetricId::Pace, MetricId::HeartRate, MetricId::Distance]
         );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn parse_metrics_skips_invalid() {
+        let mut warnings = Vec::new();
+        let ov = LayoutOverrides::from_parts(
+            Some(vec!["nonsense,hr".to_string()]),
+            None,
+            vec![],
+            vec![],
+            &mut warnings,
+        );
+        assert_eq!(ov.metrics.unwrap(), vec![MetricId::HeartRate]);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("unknown metric 'nonsense'"));
     }
 
     #[test]
@@ -749,7 +767,15 @@ mod tests {
 
     #[test]
     fn parse_widgets_from_list() {
-        let set = WidgetId::parse_list("time,map,metrics").unwrap();
+        let mut warnings = Vec::new();
+        let ov = LayoutOverrides::from_parts(
+            None,
+            Some(vec!["time,map,metrics".to_string()]),
+            vec![],
+            vec![],
+            &mut warnings,
+        );
+        let set = ov.widgets.unwrap();
         assert!(set.time_chip);
         assert!(set.map);
         assert!(set.metrics_panel);

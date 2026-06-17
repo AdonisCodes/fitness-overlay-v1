@@ -183,14 +183,17 @@ fn main() -> Result<()> {
                 .unwrap_or_default(),
         );
 
+        let mut warnings = Vec::new();
         let overrides = crate::layout::LayoutOverrides::from_parts(
             cli.metrics.clone(),
             cli.widgets.clone(),
             cli.enable_widget.clone(),
             cli.disable_widget.clone(),
-        )?;
+            &mut warnings,
+        );
         let layout = layout::LayoutConfig::resolve(&timeline, &overrides, cli.max_hr);
-        for w in &layout.warnings {
+        warnings.extend(layout.warnings.clone());
+        for w in &warnings {
             eprintln!("warning: {w}");
         }
 

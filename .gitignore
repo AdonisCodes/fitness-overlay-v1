@@ -2,3 +2,4 @@
 /out
 *.mp4
 *.fit
+.DS_Store
