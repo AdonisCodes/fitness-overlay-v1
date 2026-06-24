@@ -16,7 +16,7 @@ pub enum EncoderPref {
 }
 
 fn ffmpeg_has_encoder(name: &str) -> bool {
-    Command::new("ffmpeg")
+    Command::new(crate::bundled::ffmpeg_path())
         .args(["-hide_banner", "-encoders"])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).contains(name))
@@ -78,7 +78,7 @@ pub fn compose(
 
     let size = format!("{}x{}", video.width, video.height);
 
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = crate::bundled::ffmpeg_command();
     cmd.args(["-hide_banner", "-loglevel", "error", "-nostats", "-y"])
         .arg("-i")
         .arg(&video.path)

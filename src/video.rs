@@ -4,7 +4,6 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, Utc};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[derive(Debug, Clone)]
 pub struct VideoInfo {
@@ -97,7 +96,7 @@ pub fn probe(path: &Path) -> Result<VideoInfo> {
         format!("cannot parse recording start time from filename '{filename}' (expected Insta360 format VID_YYYYMMDD_HHMMSS_XX_NNN.mp4)")
     })?;
 
-    let out = Command::new("ffprobe")
+    let out = crate::bundled::ffprobe_command()
         .args([
             "-v",
             "error",

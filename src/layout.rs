@@ -1,10 +1,11 @@
 //! Layout configuration: sport defaults, CLI overrides, and data-aware resolution.
 
 use crate::fit::{SportKind, Timeline};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// User-facing metric identifiers (CLI tokens map to these).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MetricId {
     Pace,
     Speed,
@@ -17,7 +18,7 @@ pub enum MetricId {
 }
 
 /// Overlay widgets (distinct from individual metrics).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WidgetId {
     TimeChip,
     MetricsPanel,
@@ -27,7 +28,7 @@ pub enum WidgetId {
 }
 
 /// Resolved widget enable flags.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct WidgetSet {
     pub time_chip: bool,
     pub metrics_panel: bool,

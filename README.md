@@ -76,18 +76,31 @@ fitoverlay --fit hike.fit --widgets time,metrics --metrics distance,altitude VID
 ## Requirements
 
 - Rust (stable)
-- `ffmpeg` and `ffprobe` on PATH (`brew install ffmpeg`)
+- `ffmpeg` and `ffprobe` on PATH (`brew install ffmpeg`), or place static binaries under `vendor/ffmpeg/<TARGET>/` to bundle them with the build (see `vendor/README.md`)
 
-## Usage
+## Desktop editor
+
+Launch the GUI with no arguments:
+
+```bash
+cargo build --release
+./target/release/fitnessoverlay
+```
+
+Open a `.fit` file and one or more videos, scrub the timeline to preview the burned overlay before export, tweak metrics/widgets/theme, and save presets to `~/.config/fitnessoverlay/`.
+
+## Usage (CLI)
+
+Pass any CLI flags to run headless export (same pipeline as the editor):
 
 ```bash
 cargo build --release
 
 # Single video
-./target/release/fitoverlay --fit morning-run.fit VID_20260607_170953_00_017.mp4
+./target/release/fitnessoverlay --fit morning-run.fit VID_20260607_170953_00_017.mp4
 
 # Multiple clips from the same workout; outputs go to out/<name>_overlay.mp4
-./target/release/fitoverlay --fit ride.fit --out out VID_*.mp4
+./target/release/fitnessoverlay --fit ride.fit --out out VID_*.mp4
 ```
 
 ### Options

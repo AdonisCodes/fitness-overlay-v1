@@ -12,6 +12,7 @@ pub mod text;
 
 use crate::fit::{Snapshot, SportKind, Timeline};
 use crate::layout::{LayoutConfig, MetricId};
+use crate::theme::ThemeConfig;
 use anyhow::{Context, Result};
 use map::Track;
 use text::GlyphCache;
@@ -30,20 +31,15 @@ const MARGIN: f32 = 48.0;
 /// Landscape clips use a compact bottom-left HUD instead of a full-width bar.
 const LANDSCAPE_PANEL_WIDTH_FRAC: f32 = 0.38;
 /// Minimum gap between the rightmost unit ink and the column divider.
-const UNIT_DIVIDER_GAP: f32 = 20.0;
+const UNIT_DIVIDER_GAP: f32 = 40.0;
+/// Floor for auto-shrinking metric values that would otherwise spill into the next cell.
+const MIN_METRIC_VALUE_SCALE: f32 = 0.58;
+/// Floor for auto-shrinking metric labels (e.g. ❤ HEART RATE in narrow landscape cells).
+const MIN_LABEL_SCALE: f32 = 0.58;
+/// Extra right-side buffer when fitting label text beside icons.
+const LABEL_TEXT_BUFFER: f32 = 8.0;
 
 const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
-const LABEL: [f32; 4] = [1.0, 1.0, 1.0, 0.72];
-const UNIT: [f32; 4] = [1.0, 1.0, 1.0, 0.68];
-const ACCENT: (u8, u8, u8) = (255, 122, 26);
-const PANEL_BG: (u8, u8, u8, u8) = (10, 12, 18, 115);
-const ZONE_COLORS: [(u8, u8, u8); 5] = [
-    (132, 138, 148), // Z1 grey
-    (66, 133, 244),  // Z2 blue
-    (52, 168, 83),   // Z3 green
-    (255, 122, 26),  // Z4 orange (accent)
-    (217, 48, 37),   // Z5 red
-];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetricKind {
@@ -68,6 +64,15 @@ impl MetricKind {
             MetricKind::Power => "POWER",
             MetricKind::ElevGain => "ELEV GAIN",
             MetricKind::Altitude => "ALTITUDE",
+        }
+    }
+
+    /// Shorter label used when the full label cannot fit beside its icon.
+    fn compact_label(&self) -> &'static str {
+        match self {
+            MetricKind::HeartRate => "HR",
+            MetricKind::ElevGain => "ELEV",
+            _ => self.label(),
         }
     }
 
@@ -141,6 +146,81 @@ impl MetricKind {
             MetricId::Altitude => MetricKind::Altitude,
         }
     }
+}
+
+/// Pick a label size (and shortened text if needed) that fits inside the cell.
+fn fit_cell_label(
+    semi: &mut GlyphCache,
+    kind: MetricKind,
+    text_available: f32,
+    label_px: f32,
+    tracking: f32,
+) -> (f32, &'static str) {
+    let min_lp = label_px * MIN_LABEL_SCALE;
+
+    fn largest_fitting_lp(
+        semi: &mut GlyphCache,
+        text: &str,
+        text_available: f32,
+        label_px: f32,
+        min_lp: f32,
+        tracking: f32,
+    ) -> f32 {
+        let mut lo = min_lp;
+        let mut hi = label_px;
+        let mut best = min_lp;
+        for _ in 0..12 {
+            let mid = (lo + hi) / 2.0;
+            let ink_w = semi.measure_extents(text, mid, false, tracking).1;
+            if ink_w <= text_available {
+                best = mid;
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        best
+    }
+
+    let full = kind.label();
+    let mut text = full;
+    let mut lp = largest_fitting_lp(semi, text, text_available, label_px, min_lp, tracking);
+    if semi.measure_extents(text, lp, false, tracking).1 > text_available {
+        text = kind.compact_label();
+        lp = largest_fitting_lp(semi, text, text_available, label_px, min_lp, tracking);
+    }
+    (lp, text)
+}
+
+/// Largest uniform scale (down to [`MIN_METRIC_VALUE_SCALE`]) so value + unit fit.
+fn largest_fitting_metric_scale(
+    bold: &mut GlyphCache,
+    semi: &mut GlyphCache,
+    value: &str,
+    unit: &str,
+    available: f32,
+    value_px: f32,
+    unit_px: f32,
+    gap_base: f32,
+) -> f32 {
+    let mut lo = MIN_METRIC_VALUE_SCALE;
+    let mut hi = 1.0f32;
+    let mut best = MIN_METRIC_VALUE_SCALE;
+    for _ in 0..12 {
+        let mid = (lo + hi) / 2.0;
+        let vp = value_px * mid;
+        let up = unit_px * mid;
+        let gap = gap_base * mid;
+        let (_, vw) = bold.measure_extents(value, vp, true, 0.0);
+        let (_, uw) = semi.measure_extents(unit, up, false, 0.0);
+        if vw + gap + uw <= available {
+            best = mid;
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    best
 }
 
 pub fn fmt_duration(secs: f64) -> String {
@@ -249,6 +329,7 @@ struct ZoneWidget {
 pub struct OverlayRenderer {
     sport: SportKind,
     max_hr: f64,
+    theme: ThemeConfig,
     static_layer: Pixmap,
     frame: Pixmap,
     bold: GlyphCache,
@@ -267,12 +348,16 @@ impl OverlayRenderer {
         height: u32,
         max_hr: f64,
         layout: &LayoutConfig,
+        theme: &ThemeConfig,
     ) -> Result<OverlayRenderer> {
         let w = width as f32;
         let h = height as f32;
         let landscape = w > h;
+        let panel_bg = theme.panel_bg_rgba();
+        let zone_colors = theme.zone_colors;
+        let label_color = theme.label_color();
         // Scale from the short side so a 1920×1080 clip doesn't blow up vs 1080×1920.
-        let s = w.min(h) / DESIGN_W;
+        let s = w.min(h) / DESIGN_W * theme.ui_scale;
         let mut static_layer =
             Pixmap::new(width, height).context("allocating static layer pixmap")?;
         let frame = Pixmap::new(width, height).context("allocating frame pixmap")?;
@@ -295,7 +380,7 @@ impl OverlayRenderer {
             chip_w,
             chip_h,
             22.0 * s,
-            PANEL_BG,
+            panel_bg,
         );
         let time_chip = TimeChip {
             text_x: chip_x + pad_x,
@@ -345,13 +430,12 @@ impl OverlayRenderer {
                 panel_w,
                 panel_h,
                 if landscape { 22.0 * s } else { 28.0 * s },
-                PANEL_BG,
+                panel_bg,
             );
             let n = kinds.len();
             let cw = panel_w / n as f32;
             for (i, &kind) in kinds.iter().enumerate() {
                 let cx = panel_x + i as f32 * cw;
-                let mut text_x = cx + cell_pad;
                 let label_baseline = panel_y + if landscape { 52.0 * s } else { 64.0 * s };
                 // Divider between cells.
                 if i > 0 {
@@ -365,13 +449,23 @@ impl OverlayRenderer {
                         (255, 255, 255, 30),
                     );
                 }
-                // Label icons.
+                // Label icons + text, fitted so ink stays left of the divider gutter.
                 let icon_size = if landscape { 20.0 * s } else { 26.0 * s };
                 let icon_y = label_baseline - icon_size + 3.0 * s;
+                let content_left = cx + cell_pad;
+                let content_right = cx + cw - UNIT_DIVIDER_GAP * s;
+                let icon_w = match kind {
+                    MetricKind::HeartRate | MetricKind::ElevGain => icon_size + 8.0 * s,
+                    _ => 0.0,
+                };
+                let text_available =
+                    (content_right - content_left - icon_w - LABEL_TEXT_BUFFER * s).max(1.0);
+                let tracking = if landscape { 2.0 * s } else { 3.0 * s };
+                let mut text_x = content_left;
                 match kind {
                     MetricKind::HeartRate => {
                         draw_heart(&mut static_layer, text_x, icon_y, icon_size, (229, 57, 53, 255));
-                        text_x += icon_size + 8.0 * s;
+                        text_x += icon_w;
                     }
                     MetricKind::ElevGain => {
                         draw_mountain(
@@ -381,19 +475,21 @@ impl OverlayRenderer {
                             icon_size,
                             (255, 255, 255, 215),
                         );
-                        text_x += icon_size + 8.0 * s;
+                        text_x += icon_w;
                     }
                     _ => {}
                 }
+                let (label_draw_px, label_text) =
+                    fit_cell_label(&mut semi, kind, text_available, label_px, tracking);
                 semi.draw(
                     &mut static_layer,
-                    kind.label(),
+                    label_text,
                     text_x,
                     label_baseline,
-                    label_px,
-                    LABEL,
+                    label_draw_px,
+                    label_color,
                     false,
-                    if landscape { 2.0 * s } else { 3.0 * s },
+                    tracking,
                 );
                 cells.push(Cell {
                     kind,
@@ -460,7 +556,8 @@ impl OverlayRenderer {
             let zy = next_y - zh;
             let gap = 6.0 * s;
             let seg_w = (panel_w - 4.0 * gap) / 5.0;
-            for (i, &(r, g, b)) in ZONE_COLORS.iter().enumerate() {
+            for (i, colors) in zone_colors.iter().enumerate() {
+                let (r, g, b) = (colors[0], colors[1], colors[2]);
                 let zx = panel_x + i as f32 * (seg_w + gap);
                 fill_rrect(&mut static_layer, zx, zy, seg_w, zh, zh / 2.0, (r, g, b, 217));
             }
@@ -491,7 +588,7 @@ impl OverlayRenderer {
                     panel_w,
                     eh,
                     24.0 * s,
-                    PANEL_BG,
+                    panel_bg,
                 );
                 let ox = panel_x + pad;
                 let oy = ey + pad;
@@ -515,6 +612,7 @@ impl OverlayRenderer {
         Ok(OverlayRenderer {
             sport: tl.sport,
             max_hr,
+            theme: theme.clone(),
             static_layer,
             frame,
             bold,
@@ -530,6 +628,8 @@ impl OverlayRenderer {
     /// Render the overlay at activity time `t_act` into `out` as straight
     /// (non-premultiplied) RGBA. `fade` in 0..=1 scales the overall opacity.
     pub fn render_frame(&mut self, snap: &Snapshot, t_act: f64, fade: f32, out: &mut [u8]) {
+        let accent = self.theme.accent_rgb();
+        let unit_color = self.theme.unit_color();
         self.frame
             .data_mut()
             .copy_from_slice(self.static_layer.data());
@@ -557,7 +657,7 @@ impl OverlayRenderer {
                 tw + 2.0 * pad,
                 self.time_chip.chip_h,
                 self.time_chip.chip_h * 0.23,
-                (ACCENT.0, ACCENT.1, ACCENT.2, 230),
+                (accent.0, accent.1, accent.2, 230),
             );
             self.semi.draw(
                 &mut self.frame,
@@ -571,27 +671,40 @@ impl OverlayRenderer {
             );
         }
 
-        // Metric cells — value + unit flow left-to-right; clamp so unit ink
-        // never crosses the divider gutter on the right.
+        // Metric cells — value + unit flow left-to-right. When the pair is wider
+        // than the column, shrink both proportionally (down to MIN_METRIC_VALUE_SCALE).
         for cell in &self.cells {
             let value = cell.kind.format(snap, self.sport);
             let unit = cell.kind.unit(self.sport);
             let left = cell.x + cell.pad;
             let right_ink_limit = cell.x + cell.w - cell.unit_inset;
-            let (_, unit_ink_w) = self.semi.measure_extents(unit, cell.unit_px, false, 0.0);
-            let (value_w, _) = self.bold.measure_extents(&value, cell.value_px, true, 0.0);
-            let gap = 8.0 * (cell.value_px / 52.0);
-            let mut unit_x = left + value_w + gap;
-            if unit_x + unit_ink_w > right_ink_limit {
-                unit_x = (right_ink_limit - unit_ink_w).max(left + value_w + gap);
-            }
-            let value_x = (unit_x - gap - value_w).max(left);
+            let available = (right_ink_limit - left).max(1.0);
+            let gap_base = 8.0 * (cell.value_px / 52.0);
+            let scale = largest_fitting_metric_scale(
+                &mut self.bold,
+                &mut self.semi,
+                &value,
+                unit,
+                available,
+                cell.value_px,
+                cell.unit_px,
+                gap_base,
+            );
+
+            let value_px = cell.value_px * scale;
+            let unit_px = cell.unit_px * scale;
+            let gap = gap_base * scale;
+            let (_, value_ink_w) = self.bold.measure_extents(&value, value_px, true, 0.0);
+            let (_, unit_ink_w) = self.semi.measure_extents(unit, unit_px, false, 0.0);
+            let unit_x = right_ink_limit - unit_ink_w;
+            let value_x = (unit_x - gap - value_ink_w).max(left);
+
             self.bold.draw(
                 &mut self.frame,
                 &value,
                 value_x,
                 cell.value_baseline,
-                cell.value_px,
+                value_px,
                 WHITE,
                 true,
                 0.0,
@@ -601,8 +714,8 @@ impl OverlayRenderer {
                 unit,
                 unit_x,
                 cell.value_baseline,
-                cell.unit_px,
-                UNIT,
+                unit_px,
+                unit_color,
                 false,
                 0.0,
             );
@@ -625,7 +738,7 @@ impl OverlayRenderer {
                         &mut m.traveled,
                         &path,
                         m.stroke_w,
-                        (ACCENT.0, ACCENT.1, ACCENT.2, 255),
+                        (accent.0, accent.1, accent.2, 255),
                     );
                 }
                 m.committed = idx;
@@ -640,7 +753,7 @@ impl OverlayRenderer {
                 None,
             );
             let (cx, cy) = (m.x + cur.0, m.y + cur.1);
-            fill_circle(&mut self.frame, cx, cy, m.dot_r, (ACCENT.0, ACCENT.1, ACCENT.2, 255));
+            fill_circle(&mut self.frame, cx, cy, m.dot_r, (accent.0, accent.1, accent.2, 255));
             stroke_circle(&mut self.frame, cx, cy, m.dot_r, m.stroke_w * 0.55, (255, 255, 255, 255));
         }
 
@@ -648,19 +761,19 @@ impl OverlayRenderer {
         if let Some(e) = &self.elev {
             let (x, y) = e.track.point_at(t_act);
             let (cx, cy) = (e.origin_x + x, e.origin_y + y);
-            fill_circle(&mut self.frame, cx, cy, e.dot_r, (ACCENT.0, ACCENT.1, ACCENT.2, 255));
+            fill_circle(&mut self.frame, cx, cy, e.dot_r, (accent.0, accent.1, accent.2, 255));
             stroke_circle(&mut self.frame, cx, cy, e.dot_r, 2.5, (255, 255, 255, 255));
         }
 
         // HR zone marker.
-        if let Some(z) = &self.zone
-            && let Some(hr) = snap.hr
-        {
-            let frac = (((hr / self.max_hr) - 0.5) / 0.5).clamp(0.0, 1.0) as f32;
-            let cx = z.x + frac * z.w;
-            let cy = z.y + z.h / 2.0;
-            fill_circle(&mut self.frame, cx, cy, z.marker_r, (255, 255, 255, 255));
-            stroke_circle(&mut self.frame, cx, cy, z.marker_r, 3.0, (0, 0, 0, 70));
+        if let Some(z) = &self.zone {
+            if let Some(hr) = snap.hr {
+                let frac = (((hr / self.max_hr) - 0.5) / 0.5).clamp(0.0, 1.0) as f32;
+                let cx = z.x + frac * z.w;
+                let cy = z.y + z.h / 2.0;
+                fill_circle(&mut self.frame, cx, cy, z.marker_r, (255, 255, 255, 255));
+                stroke_circle(&mut self.frame, cx, cy, z.marker_r, 3.0, (0, 0, 0, 70));
+            }
         }
 
         write_rgba_straight(&self.frame, fade, out);
@@ -862,6 +975,7 @@ mod tests {
             h,
             190.0,
             &LayoutConfig::resolve(&tl, &Default::default(), 190.0),
+            &ThemeConfig::default(),
         )
         .unwrap();
     }
@@ -871,10 +985,30 @@ mod tests {
         use crate::fit::{Sample, Timeline};
         use chrono::TimeZone;
 
+        fn max_ink_x_in_band(
+            out: &[u8],
+            w: u32,
+            x0: u32,
+            x1: u32,
+            y0: u32,
+            y1: u32,
+        ) -> u32 {
+            let mut max_x = x0;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    if out[((y * w + x) * 4 + 3) as usize] > 0 {
+                        max_x = max_x.max(x);
+                    }
+                }
+            }
+            max_x
+        }
+
         fn check(tl: &Timeline, w: u32, h: u32) {
             let s = w.min(h) as f32 / DESIGN_W;
+            let landscape = w > h;
             let panel_x = MARGIN * s;
-            let panel_w = if w > h {
+            let panel_w = if landscape {
                 w as f32 * LANDSCAPE_PANEL_WIDTH_FRAC
             } else {
                 w as f32 - 2.0 * MARGIN * s
@@ -883,14 +1017,21 @@ mod tests {
             let n = layout.metrics.len().max(1);
             let cw = panel_w / n as f32;
             let min_gap = (UNIT_DIVIDER_GAP * s * 0.85).round() as u32;
-            let y0 = if w > h {
+
+            let value_y0 = if landscape {
                 (h as f32 - MARGIN * s - 160.0 * s + 100.0 * s) as u32
             } else {
                 (h as f32 - 120.0 * s - 200.0 * s + 128.0 * s) as u32
             };
-            let y1 = y0 + 40;
+            let value_y1 = value_y0 + 40;
+            let label_y0 = if landscape {
+                (h as f32 - MARGIN * s - 160.0 * s + 52.0 * s - 14.0 * s) as u32
+            } else {
+                (h as f32 - 120.0 * s - 200.0 * s + 64.0 * s - 16.0 * s) as u32
+            };
+            let label_y1 = label_y0 + 30;
 
-            let mut r = OverlayRenderer::new(&tl, w, h, 190.0, &layout).unwrap();
+            let mut r = OverlayRenderer::new(&tl, w, h, 190.0, &layout, &ThemeConfig::default()).unwrap();
             let snap = tl.snapshot(tl.duration() * 0.62);
             let mut out = vec![0u8; (w * h * 4) as usize];
             r.render_frame(&snap, tl.duration() * 0.62, 1.0, &mut out);
@@ -898,21 +1039,20 @@ mod tests {
             for i in 0..n.saturating_sub(1) {
                 let div = (panel_x + (i as f32 + 1.0) * cw).round() as u32;
                 let x0 = (panel_x + i as f32 * cw).round() as u32;
-                let mut max_x = x0;
-                for y in y0..y1 {
-                    for x in x0..div.saturating_sub(min_gap) {
-                        if out[((y * w + x) * 4 + 3) as usize] > 0 {
-                            max_x = max_x.max(x);
-                        }
-                    }
+                let scan_limit = div.saturating_sub(min_gap);
+                for (band, y0, y1) in [
+                    ("label", label_y0, label_y1),
+                    ("value", value_y0, value_y1),
+                ] {
+                    let max_x = max_ink_x_in_band(&out, w, x0, scan_limit, y0, y1);
+                    assert!(
+                        max_x <= div - min_gap,
+                        "{:?} {}x{} cell {i} {band}: ink to {max_x}, divider {div}, need {min_gap}px",
+                        tl.sport,
+                        w,
+                        h
+                    );
                 }
-                assert!(
-                    max_x <= div - min_gap,
-                    "{:?} {}x{} cell {i}: ink to {max_x}, divider {div}, need {min_gap}px",
-                    tl.sport,
-                    w,
-                    h
-                );
             }
         }
 
@@ -944,6 +1084,40 @@ mod tests {
             check(&base(sport), 1080, 1920);
             check(&base(sport), 2752, 1530);
         }
+
+        // Wide elevation gain with thousands separator — the case that overflows
+        // at full size on portrait hike layout.
+        let hike_overflow = Timeline {
+            start_utc: chrono::Utc.with_ymd_and_hms(2026, 6, 7, 15, 0, 0).unwrap(),
+            sport: SportKind::Hike,
+            utc_offset_secs: None,
+            samples: vec![
+                Sample {
+                    t: 0.0,
+                    hr: Some(118.0),
+                    dist: Some(8420.0),
+                    alt: Some(520.0),
+                    ascent: 12_450.0,
+                    lat: Some(47.0),
+                    lon: Some(8.0),
+                    ..Default::default()
+                },
+                Sample {
+                    t: 60.0,
+                    hr: Some(118.0),
+                    dist: Some(8420.0),
+                    alt: Some(520.0),
+                    ascent: 12_450.0,
+                    lat: Some(47.001),
+                    lon: Some(8.001),
+                    ..Default::default()
+                },
+            ],
+            pauses: vec![],
+            has_gps: true,
+        };
+        check(&hike_overflow, 1080, 1920);
+        check(&hike_overflow, 2752, 1530);
     }
 
     #[test]
@@ -982,6 +1156,7 @@ mod tests {
             h,
             190.0,
             &LayoutConfig::resolve(&tl, &Default::default(), 190.0),
+            &ThemeConfig::default(),
         )
         .unwrap();
         let snap = tl.snapshot(0.0);
@@ -1029,6 +1204,37 @@ mod tests {
                 "{unit}: measured ink {ink_w} < drawn max_x {max_x}"
             );
         }
+    }
+
+    #[test]
+    fn heart_rate_label_keeps_full_text_on_portrait() {
+        use super::text::GlyphCache;
+        let mut semi = GlyphCache::new(FONT_SEMI);
+        let cw = (1080.0 - 2.0 * MARGIN) / 4.0;
+        let text_available = cw - 25.0 - UNIT_DIVIDER_GAP - (26.0 + 8.0) - LABEL_TEXT_BUFFER;
+        let (lp, text) = fit_cell_label(&mut semi, MetricKind::HeartRate, text_available, 24.0, 3.0);
+        assert_eq!(text, "HEART RATE");
+        assert!(lp >= 24.0 * MIN_LABEL_SCALE);
+    }
+
+    #[test]
+    fn heart_rate_label_fits_on_landscape() {
+        use super::text::GlyphCache;
+        let mut semi = GlyphCache::new(FONT_SEMI);
+        let s = 1530.0 / DESIGN_W;
+        let cw = 2752.0 * LANDSCAPE_PANEL_WIDTH_FRAC / 4.0;
+        let tracking = 2.0 * s;
+        let text_available =
+            cw - 20.0 * s - UNIT_DIVIDER_GAP * s - (20.0 * s + 8.0 * s) - LABEL_TEXT_BUFFER * s;
+        let (lp, text) = fit_cell_label(
+            &mut semi,
+            MetricKind::HeartRate,
+            text_available,
+            20.0 * s,
+            tracking,
+        );
+        let ink = semi.measure_extents(text, lp, false, tracking).1;
+        assert!(ink <= text_available + 0.5, "ink {ink} > {text_available}");
     }
 
     #[test]
@@ -1116,12 +1322,24 @@ mod tests {
         path: &str,
         overrides: &crate::layout::LayoutOverrides,
     ) {
+        render_preview_with_theme(tl, w, h, path, overrides, &ThemeConfig::default());
+    }
+
+    fn render_preview_with_theme(
+        tl: &crate::fit::Timeline,
+        w: u32,
+        h: u32,
+        path: &str,
+        overrides: &crate::layout::LayoutOverrides,
+        theme: &ThemeConfig,
+    ) {
         let mut r = OverlayRenderer::new(
             tl,
             w,
             h,
             190.0,
             &LayoutConfig::resolve(tl, overrides, 190.0),
+            theme,
         )
         .unwrap();
         let t = tl.duration() * 0.62;
@@ -1151,8 +1369,77 @@ mod tests {
     #[test]
     #[ignore]
     fn render_layout_previews() {
+        use crate::fit::{Sample, Timeline};
+        use chrono::TimeZone;
+
+        struct MetricFixture {
+            name: &'static str,
+            sport: SportKind,
+            sample: Sample,
+        }
+
+        fn pace_speed(secs_per_km: f64) -> f64 {
+            1000.0 / secs_per_km
+        }
+
+        fn gps_track(t: f64) -> (f64, f64) {
+            let a = t / 60.0 * std::f64::consts::TAU;
+            (
+                47.0 + 0.004 * (a.sin() + 0.3 * (3.0 * a).sin()),
+                8.0 + 0.004 * (a.cos() + 0.3 * (2.0 * a).cos()),
+            )
+        }
+
+        fn fixed_timeline(sport: SportKind, sample: Sample) -> Timeline {
+            let gps = sport != SportKind::IndoorRun;
+            let mut start = sample;
+            start.t = 0.0;
+            start.speed_smooth = start.speed_smooth.or(start.speed);
+            if gps {
+                let (lat, lon) = gps_track(0.0);
+                start.lat = Some(lat);
+                start.lon = Some(lon);
+            }
+            let mut end = start.clone();
+            end.t = 60.0;
+            if gps {
+                let (lat, lon) = gps_track(60.0);
+                end.lat = Some(lat);
+                end.lon = Some(lon);
+            }
+            Timeline {
+                start_utc: chrono::Utc.with_ymd_and_hms(2026, 6, 7, 15, 9, 53).unwrap(),
+                sport,
+                utc_offset_secs: Some(7200),
+                samples: vec![start, end],
+                pauses: vec![],
+                has_gps: gps,
+            }
+        }
+
         std::fs::create_dir_all("target/previews").unwrap();
         let overrides = crate::layout::LayoutOverrides::default();
+
+        fn render_both(
+            tl: &crate::fit::Timeline,
+            stem: &str,
+            overrides: &crate::layout::LayoutOverrides,
+        ) {
+            render_preview_with_overrides(
+                tl,
+                1080,
+                1920,
+                &format!("target/previews/{stem}.png"),
+                overrides,
+            );
+            render_preview_with_overrides(
+                tl,
+                2752,
+                1530,
+                &format!("target/previews/{stem}-landscape.png"),
+                overrides,
+            );
+        }
 
         for (sport, name) in [
             (SportKind::OutdoorRun, "outdoor-run"),
@@ -1160,15 +1447,133 @@ mod tests {
             (SportKind::BikeRide, "bike-ride"),
             (SportKind::Hike, "hike"),
         ] {
-            let tl = synth(sport);
-            render_preview_with_overrides(&tl, 1080, 1920, &format!("target/previews/{name}.png"), &overrides);
-            render_preview_with_overrides(
-                &tl,
-                2752,
-                1530,
-                &format!("target/previews/{name}-landscape.png"),
-                &overrides,
-            );
+            render_both(&synth(sport), name, &overrides);
+        }
+
+        let base_run = Sample {
+            hr: Some(142.0),
+            speed: Some(3.0),
+            speed_smooth: Some(3.0),
+            dist: Some(5000.0),
+            cadence: Some(88.0),
+            ..Default::default()
+        };
+        let base_bike = Sample {
+            hr: Some(125.0),
+            speed: Some(9.36),
+            speed_smooth: Some(9.36),
+            dist: Some(9510.0),
+            power: Some(245.0),
+            ..Default::default()
+        };
+        let base_hike = Sample {
+            hr: Some(118.0),
+            speed: Some(1.4),
+            speed_smooth: Some(1.4),
+            dist: Some(8420.0),
+            alt: Some(520.0),
+            ascent: 420.0,
+            ..Default::default()
+        };
+
+        let metric_fixtures = [
+            MetricFixture {
+                name: "outdoor-run-pace-10min",
+                sport: SportKind::OutdoorRun,
+                sample: Sample {
+                    speed: Some(pace_speed(10.0 * 60.0 + 30.0)),
+                    speed_smooth: Some(pace_speed(10.0 * 60.0 + 30.0)),
+                    ..base_run
+                },
+            },
+            MetricFixture {
+                name: "outdoor-run-pace-12min",
+                sport: SportKind::OutdoorRun,
+                sample: Sample {
+                    speed: Some(pace_speed(12.0 * 60.0 + 48.0)),
+                    speed_smooth: Some(pace_speed(12.0 * 60.0 + 48.0)),
+                    ..base_run
+                },
+            },
+            MetricFixture {
+                name: "indoor-run-pace-10min",
+                sport: SportKind::IndoorRun,
+                sample: Sample {
+                    speed: Some(pace_speed(10.0 * 60.0 + 5.0)),
+                    speed_smooth: Some(pace_speed(10.0 * 60.0 + 5.0)),
+                    ..base_run
+                },
+            },
+            MetricFixture {
+                name: "outdoor-run-dist-hundredths",
+                sport: SportKind::OutdoorRun,
+                sample: Sample {
+                    dist: Some(4370.0),
+                    ..base_run
+                },
+            },
+            MetricFixture {
+                name: "outdoor-run-dist-tenths",
+                sport: SportKind::OutdoorRun,
+                sample: Sample {
+                    dist: Some(15_500.0),
+                    ..base_run
+                },
+            },
+            MetricFixture {
+                name: "outdoor-run-dist-whole",
+                sport: SportKind::OutdoorRun,
+                sample: Sample {
+                    dist: Some(123_400.0),
+                    ..base_run
+                },
+            },
+            MetricFixture {
+                name: "bike-ride-power-245",
+                sport: SportKind::BikeRide,
+                sample: Sample {
+                    power: Some(245.0),
+                    ..base_bike
+                },
+            },
+            MetricFixture {
+                name: "bike-ride-power-1234",
+                sport: SportKind::BikeRide,
+                sample: Sample {
+                    power: Some(1234.0),
+                    ..base_bike
+                },
+            },
+            MetricFixture {
+                name: "hike-elev-gain-12450",
+                sport: SportKind::Hike,
+                sample: Sample {
+                    ascent: 12_450.0,
+                    ..base_hike
+                },
+            },
+            MetricFixture {
+                name: "hike-altitude-3842",
+                sport: SportKind::Hike,
+                sample: Sample {
+                    alt: Some(3842.0),
+                    ..base_hike
+                },
+            },
+            MetricFixture {
+                name: "hike-elev-alt-combined",
+                sport: SportKind::Hike,
+                sample: Sample {
+                    ascent: 2_450.0,
+                    alt: Some(2_845.0),
+                    dist: Some(16_240.0),
+                    ..base_hike
+                },
+            },
+        ];
+
+        for fx in metric_fixtures {
+            render_both(&fixed_timeline(fx.sport, fx.sample), fx.name, &overrides);
         }
     }
 
@@ -1253,6 +1658,58 @@ mod tests {
                 }),
                 ..Default::default()
             },
+        );
+    }
+
+    /// Editor theme variants for PR / docs: `cargo test render_editor_theme_previews -- --ignored`
+    #[test]
+    #[ignore]
+    fn render_editor_theme_previews() {
+        use crate::theme::ThemeConfig;
+        std::fs::create_dir_all("assets/editor").unwrap();
+        let tl = synth(SportKind::OutdoorRun);
+        let overrides = crate::layout::LayoutOverrides::default();
+        for (name, theme) in [
+            ("theme-default", ThemeConfig::default()),
+            ("theme-cool", ThemeConfig::cool()),
+            ("theme-compact", ThemeConfig::compact()),
+        ] {
+            render_preview_with_theme(
+                &tl,
+                1080,
+                1920,
+                &format!("assets/editor/{name}.png"),
+                &overrides,
+                &theme,
+            );
+        }
+        let hr_zones = crate::layout::LayoutOverrides {
+            enable_widgets: vec![crate::layout::WidgetId::HrZones],
+            ..Default::default()
+        };
+        render_preview_with_theme(
+            &tl,
+            1080,
+            1920,
+            "assets/editor/preset-hr-zones.png",
+            &hr_zones,
+            &ThemeConfig::cool(),
+        );
+        let custom = crate::layout::LayoutOverrides {
+            metrics: Some(vec![
+                crate::layout::MetricId::Distance,
+                crate::layout::MetricId::Pace,
+                crate::layout::MetricId::HeartRate,
+            ]),
+            ..Default::default()
+        };
+        render_preview_with_theme(
+            &tl,
+            1080,
+            1920,
+            "assets/editor/preset-custom-metrics.png",
+            &custom,
+            &ThemeConfig::default(),
         );
     }
 

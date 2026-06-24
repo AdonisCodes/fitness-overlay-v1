@@ -341,9 +341,11 @@ fn build_timeline(records: &[FitDataRecord]) -> Result<Timeline> {
     timer_events.sort_by_key(|(ts, _)| *ts);
     for (ts, is_start) in timer_events {
         let t = (ts - start_utc).num_milliseconds() as f64 / 1000.0;
-        if is_start && let Some(s) = stop_at.take() {
-            if t > s + 0.5 {
-                pauses.push((s, t));
+        if is_start {
+            if let Some(s) = stop_at.take() {
+                if t > s + 0.5 {
+                    pauses.push((s, t));
+                }
             }
         } else if !is_start && stop_at.is_none() {
             stop_at = Some(t);
