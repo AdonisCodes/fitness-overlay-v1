@@ -1,5 +1,7 @@
 # fitoverlay
 
+fix misalignment between layout and generated image for indoor runs (like the gap between text).
+
 Burns a fitness HUD overlay — transparent "noodle map", heart rate, pace/speed,
 distance and more — directly onto Insta360 vertical videos, driven by the
 `.fit` activity file recorded by your watch or bike computer.
@@ -36,6 +38,41 @@ The layout is picked automatically from the FIT session's sport/sub-sport:
 Metrics missing from the FIT stream (e.g. no power meter) are collapsed
 rather than shown blank. Style mockups live in the assets folder.
 
+## Customizing the layout
+
+You can override the automatic sport layouts using these flags:
+
+- `--metrics <list>`: Replace the bottom-row metrics (Options: `pace`, `speed`, `hr`, `distance`, `cadence`, `power`, `elev-gain`, `altitude`).
+- `--widgets <list>`: Full set reset (Options: `time`, `metrics`, `map`, `elevation`, `hr-zones`).
+- `--widget <name>`: Enable a widget in addition to sport defaults.
+- `--no-widget <name>`: Disable a specific widget.
+
+### Examples
+
+**Custom metric order:**
+```bash
+fitoverlay --fit run.fit --metrics distance,pace,hr VID_*.mp4
+```
+![Custom metrics](assets/style-outdoor-run-custom-metrics.png)
+
+**Add HR Zones to an outdoor run:**
+```bash
+fitoverlay --fit run.fit --widget zones VID_*.mp4
+```
+![HR Zones](assets/style-outdoor-run-hr-zones.png)
+
+**Add elevation profile to a bike ride:**
+```bash
+fitoverlay --fit ride.fit --widget elevation VID_*.mp4
+```
+![Bike elevation](assets/style-bike-elevation.png)
+
+**Minimalist view (no map, specific metrics):**
+```bash
+fitoverlay --fit hike.fit --widgets time,metrics --metrics distance,altitude VID_*.mp4
+```
+![Hike minimal](assets/style-hike-minimal.png)
+
 ## Requirements
 
 - Rust (stable)
@@ -63,6 +100,10 @@ cargo build --release
 | `--utc-offset <±hh:mm>` | from FIT | Camera clock UTC offset, if the FIT file lacks timezone info or the camera clock differs |
 | `--max-hr <bpm>` | `190` | Max HR for the indoor zone bar |
 | `--encoder <auto\|hevc\|h264>` | `auto` | `auto` uses hevc_videotoolbox when available, else libx264 |
+| `--metrics <list>`| sport default | Comma-separated metrics for the bottom row |
+| `--widgets <list>`| sport default | Reset to specific widget set |
+| `--widget <name>` | none          | Enable a widget in addition to defaults |
+| `--no-widget <name>`| none        | Disable a default widget |
 
 ### Tuning sync
 

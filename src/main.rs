@@ -1,5 +1,6 @@
 mod compose;
 mod fit;
+mod layout;
 mod render;
 mod video;
 
@@ -48,6 +49,22 @@ struct Cli {
     /// Skips full frame-by-frame rendering — useful for layout/sync checks.
     #[arg(long)]
     preview_fps: Option<f64>,
+
+    /// Comma-separated metrics for the bottom HUD row (e.g. pace,hr,distance).
+    #[arg(long, value_delimiter = ',')]
+    metrics: Option<Vec<String>>,
+
+    /// Comma-separated widget set replacing sport defaults (e.g. time,map,metrics).
+    #[arg(long, value_delimiter = ',')]
+    widgets: Option<Vec<String>>,
+
+    /// Enable a widget in addition to sport defaults. Repeatable.
+    #[arg(long = "widget")]
+    enable_widget: Vec<String>,
+
+    /// Disable a widget from sport defaults. Repeatable.
+    #[arg(long = "no-widget")]
+    disable_widget: Vec<String>,
 }
 
 /// Parse "+02:00", "-05:30", "+0200" or "2" into seconds.
@@ -166,8 +183,22 @@ fn main() -> Result<()> {
                 .unwrap_or_default(),
         );
 
+        let mut warnings = Vec::new();
+        let overrides = crate::layout::LayoutOverrides::from_parts(
+            cli.metrics.clone(),
+            cli.widgets.clone(),
+            cli.enable_widget.clone(),
+            cli.disable_widget.clone(),
+            &mut warnings,
+        );
+        let layout = layout::LayoutConfig::resolve(&timeline, &overrides, cli.max_hr);
+        warnings.extend(layout.warnings.clone());
+        for w in &warnings {
+            eprintln!("warning: {w}");
+        }
+
         let mut renderer =
-            render::OverlayRenderer::new(&timeline, info.width, info.height, cli.max_hr)?;
+            render::OverlayRenderer::new(&timeline, info.width, info.height, cli.max_hr, &layout)?;
         let out_path = cli.out.join(format!("{stem}_overlay.mp4"));
         let offset = sync.offset;
         let compose_opts = compose::ComposeOptions {
