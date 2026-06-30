@@ -347,7 +347,7 @@ impl LayoutConfig {
                 SportKind::OutdoorRun | SportKind::BikeRide | SportKind::Hike
             ),
             elevation: sport == SportKind::Hike,
-            hr_zones: sport == SportKind::IndoorRun,
+            hr_zones: false,
         }
     }
 }
@@ -531,7 +531,7 @@ mod tests {
                 metrics_panel: true,
                 map: false,
                 elevation: false,
-                hr_zones: true,
+                hr_zones: false,
             }
         );
         assert_eq!(
@@ -743,7 +743,11 @@ mod tests {
             ..full_sample()
         };
         let tl = mk_timeline(SportKind::IndoorRun, vec![sample], false);
-        let layout = LayoutConfig::resolve(&tl, &LayoutOverrides::default(), 190.0);
+        let overrides = LayoutOverrides {
+            enable_widgets: vec![WidgetId::HrZones],
+            ..Default::default()
+        };
+        let layout = LayoutConfig::resolve(&tl, &overrides, 190.0);
         assert!(!layout.widgets.hr_zones);
         assert!(!layout.widgets.map);
         assert!(layout

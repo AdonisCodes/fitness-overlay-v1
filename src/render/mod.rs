@@ -27,7 +27,7 @@ const FONT_SEMI: &[u8] = include_bytes!("../../assets/fonts/Inter-SemiBold.otf")
 /// so landscape and portrait clips get similarly sized HUD elements.
 const DESIGN_W: f32 = 1080.0;
 const MARGIN: f32 = 48.0;
-/// Landscape clips use a compact bottom-left HUD instead of a full-width bar.
+/// Landscape clips use a compact bottom-right HUD instead of a full-width bar.
 const LANDSCAPE_PANEL_WIDTH_FRAC: f32 = 0.38;
 /// Minimum gap between the rightmost unit ink and the column divider.
 const UNIT_DIVIDER_GAP: f32 = 20.0;
@@ -316,7 +316,7 @@ impl OverlayRenderer {
         let (panel_x, panel_w, panel_h, value_px, label_px, unit_px, cell_pad) = if landscape {
             let panel_w = w * LANDSCAPE_PANEL_WIDTH_FRAC;
             (
-                MARGIN * s,
+                w - MARGIN * s - panel_w,
                 panel_w,
                 160.0 * s,
                 52.0 * s,
@@ -828,7 +828,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn landscape_panel_is_compact_bottom_left() {
+    fn landscape_panel_is_compact_bottom_right() {
         use crate::fit::{Sample, Timeline};
         use chrono::TimeZone;
 
@@ -854,6 +854,8 @@ mod tests {
         let s = w.min(h) as f32 / DESIGN_W;
         let panel_h = 160.0 * s;
         let panel_y = h as f32 - MARGIN * s - panel_h;
+        let panel_x = w as f32 - MARGIN * s - panel_w;
+        assert!(panel_x + panel_w <= w as f32 - MARGIN * s + 1.0);
         assert!(panel_y + panel_h <= h as f32);
         assert!(panel_h < 240.0, "panel too tall: {panel_h}");
         let _ = OverlayRenderer::new(
@@ -873,11 +875,16 @@ mod tests {
 
         fn check(tl: &Timeline, w: u32, h: u32) {
             let s = w.min(h) as f32 / DESIGN_W;
-            let panel_x = MARGIN * s;
-            let panel_w = if w > h {
+            let landscape = w > h;
+            let panel_w = if landscape {
                 w as f32 * LANDSCAPE_PANEL_WIDTH_FRAC
             } else {
                 w as f32 - 2.0 * MARGIN * s
+            };
+            let panel_x = if landscape {
+                w as f32 - MARGIN * s - panel_w
+            } else {
+                MARGIN * s
             };
             let layout = LayoutConfig::resolve(tl, &Default::default(), 190.0);
             let n = layout.metrics.len().max(1);
@@ -971,7 +978,7 @@ mod tests {
         let (w, h) = (2752u32, 1530u32);
         let s = w.min(h) as f32 / DESIGN_W;
         let panel_w = w as f32 * LANDSCAPE_PANEL_WIDTH_FRAC;
-        let panel_x = MARGIN * s;
+        let panel_x = w as f32 - MARGIN * s - panel_w;
         let cw = panel_w / 4.0;
         let divider_x = (panel_x + cw).round() as u32;
         let gap_px = (UNIT_DIVIDER_GAP * s * 0.85).round() as u32;
