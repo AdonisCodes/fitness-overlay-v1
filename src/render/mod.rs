@@ -29,6 +29,8 @@ const DESIGN_W: f32 = 1080.0;
 const MARGIN: f32 = 48.0;
 /// Landscape clips use a compact bottom-right HUD instead of a full-width bar.
 const LANDSCAPE_PANEL_WIDTH_FRAC: f32 = 0.38;
+/// Minimum scale when auto-shrinking metric values to fit a column.
+const MIN_METRIC_VALUE_SCALE: f32 = 0.58;
 /// Minimum gap between the rightmost unit ink and the column divider.
 const UNIT_DIVIDER_GAP: f32 = 20.0;
 
@@ -244,6 +246,46 @@ struct ZoneWidget {
     w: f32,
     h: f32,
     marker_r: f32,
+}
+
+/// Shrink value/unit until the ink fits between `left` and `right_ink_limit`.
+fn fit_metric_text(
+    bold: &mut GlyphCache,
+    semi: &mut GlyphCache,
+    value: &str,
+    unit: &str,
+    base_value_px: f32,
+    base_unit_px: f32,
+    left: f32,
+    right_ink_limit: f32,
+) -> (f32, f32, f32, f32) {
+    let avail = (right_ink_limit - left).max(1.0);
+    let mut value_px = base_value_px;
+    let mut unit_px = base_unit_px;
+    let min_value_px = base_value_px * MIN_METRIC_VALUE_SCALE;
+    let min_unit_px = base_unit_px * MIN_METRIC_VALUE_SCALE;
+
+    loop {
+        let gap = 8.0 * (value_px / 52.0);
+        let (_, value_ink) = bold.measure_extents(value, value_px, true, 0.0);
+        let (_, unit_ink) = semi.measure_extents(unit, unit_px, false, 0.0);
+        if value_ink + gap + unit_ink <= avail || value_px <= min_value_px {
+            let value_x = left;
+            let unit_x = left + value_ink + gap;
+            return (value_x, unit_x, value_px, unit_px);
+        }
+        value_px *= 0.92;
+        unit_px = (unit_px * 0.92).max(min_unit_px);
+        if value_px < min_value_px {
+            value_px = min_value_px;
+            let gap = 8.0 * (value_px / 52.0);
+            let (_, value_ink) = bold.measure_extents(value, value_px, true, 0.0);
+            let (_, unit_ink) = semi.measure_extents(unit, unit_px, false, 0.0);
+            let unit_x = (right_ink_limit - unit_ink).max(left);
+            let value_x = (unit_x - gap - value_ink).max(left);
+            return (value_x, unit_x, value_px, unit_px);
+        }
+    }
 }
 
 pub struct OverlayRenderer {
@@ -571,27 +613,28 @@ impl OverlayRenderer {
             );
         }
 
-        // Metric cells — value + unit flow left-to-right; clamp so unit ink
-        // never crosses the divider gutter on the right.
+        // Metric cells — value + unit; shrink if needed so unit ink stays in-column.
         for cell in &self.cells {
             let value = cell.kind.format(snap, self.sport);
             let unit = cell.kind.unit(self.sport);
             let left = cell.x + cell.pad;
             let right_ink_limit = cell.x + cell.w - cell.unit_inset;
-            let (_, unit_ink_w) = self.semi.measure_extents(unit, cell.unit_px, false, 0.0);
-            let (value_w, _) = self.bold.measure_extents(&value, cell.value_px, true, 0.0);
-            let gap = 8.0 * (cell.value_px / 52.0);
-            let mut unit_x = left + value_w + gap;
-            if unit_x + unit_ink_w > right_ink_limit {
-                unit_x = (right_ink_limit - unit_ink_w).max(left + value_w + gap);
-            }
-            let value_x = (unit_x - gap - value_w).max(left);
+            let (value_x, unit_x, value_px, unit_px) = fit_metric_text(
+                &mut self.bold,
+                &mut self.semi,
+                &value,
+                unit,
+                cell.value_px,
+                cell.unit_px,
+                left,
+                right_ink_limit,
+            );
             self.bold.draw(
                 &mut self.frame,
                 &value,
                 value_x,
                 cell.value_baseline,
-                cell.value_px,
+                value_px,
                 WHITE,
                 true,
                 0.0,
@@ -601,7 +644,7 @@ impl OverlayRenderer {
                 unit,
                 unit_x,
                 cell.value_baseline,
-                cell.unit_px,
+                unit_px,
                 UNIT,
                 false,
                 0.0,
