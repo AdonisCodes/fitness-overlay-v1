@@ -168,10 +168,11 @@ fn main() -> Result<()> {
             );
             continue;
         };
+        let (dw, dh) = info.display_size();
         eprintln!(
             "{stem}: {}x{} @ {:.2} fps, {} long; overlay visible {} - {} (activity {} - {}){}",
-            info.width,
-            info.height,
+            dw,
+            dh,
             info.fps,
             render::fmt_duration(info.duration),
             render::fmt_duration(lo),
@@ -197,8 +198,9 @@ fn main() -> Result<()> {
             eprintln!("warning: {w}");
         }
 
+        let (dw, dh) = info.display_size();
         let mut renderer =
-            render::OverlayRenderer::new(&timeline, info.width, info.height, cli.max_hr, &layout)?;
+            render::OverlayRenderer::new(&timeline, dw, dh, cli.max_hr, &layout)?;
         let out_path = cli.out.join(format!("{stem}_overlay.mp4"));
         let offset = sync.offset;
         let compose_opts = compose::ComposeOptions {

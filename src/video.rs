@@ -11,13 +11,54 @@ pub struct VideoInfo {
     pub path: PathBuf,
     /// Wall-clock recording start parsed from the filename (device-local time).
     pub start_local: NaiveDateTime,
+    /// Stored stream width from ffprobe (before display rotation).
     pub width: u32,
+    /// Stored stream height from ffprobe (before display rotation).
     pub height: u32,
+    /// Clockwise display rotation in degrees from container metadata (0, ±90, 180).
+    pub rotation: i32,
     /// Exact frame rate as reported by ffprobe (e.g. "30000/1001").
     pub fps_str: String,
     pub fps: f64,
     pub duration: f64,
     pub has_audio: bool,
+}
+
+impl VideoInfo {
+    /// Width/height after applying `rotation` (what viewers see).
+    pub fn display_size(&self) -> (u32, u32) {
+        if self.rotation.abs() == 90 {
+            (self.height, self.width)
+        } else {
+            (self.width, self.height)
+        }
+    }
+}
+
+fn rotation_from_stream(stream: &ProbeStream) -> i32 {
+    if let Some(list) = &stream.side_data_list {
+        for sd in list {
+            if let Some(r) = sd.rotation {
+                return r;
+            }
+        }
+    }
+    if let Some(tags) = &stream.tags {
+        if let Some(r) = &tags.rotate {
+            return r.parse().unwrap_or(0);
+        }
+    }
+    0
+}
+
+/// ffmpeg `transpose` / flip chain to match display orientation when `-noautorotate` is set.
+pub fn rotation_filter(rotation: i32) -> &'static str {
+    match rotation {
+        -90 => "transpose=1",
+        90 => "transpose=2",
+        180 | -180 => "hflip,vflip",
+        _ => "",
+    }
 }
 
 /// Mapping between video time and activity time for one clip:
@@ -65,6 +106,18 @@ struct ProbeStream {
     height: Option<u32>,
     avg_frame_rate: Option<String>,
     r_frame_rate: Option<String>,
+    side_data_list: Option<Vec<ProbeSideData>>,
+    tags: Option<ProbeTags>,
+}
+
+#[derive(Deserialize)]
+struct ProbeSideData {
+    rotation: Option<i32>,
+}
+
+#[derive(Deserialize)]
+struct ProbeTags {
+    rotate: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -148,6 +201,7 @@ pub fn probe(path: &Path) -> Result<VideoInfo> {
         start_local,
         width: vstream.width.context("no width")?,
         height: vstream.height.context("no height")?,
+        rotation: rotation_from_stream(vstream),
         fps_str,
         fps,
         duration,
@@ -251,6 +305,26 @@ mod tests {
         let a = compute_sync(vid_start, 600.0, 7200, act_start, 3600.0, 0.0);
         let b = compute_sync(vid_start, 600.0, 7200, act_start, 3600.0, 12.5);
         assert!((b.offset - a.offset - 12.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn display_size_swaps_on_quarter_turn() {
+        let info = VideoInfo {
+            path: PathBuf::from("x.mp4"),
+            start_local: NaiveDate::from_ymd_opt(2026, 6, 7)
+                .unwrap()
+                .and_hms_opt(12, 0, 0)
+                .unwrap(),
+            width: 1920,
+            height: 1080,
+            rotation: -90,
+            fps_str: "30".into(),
+            fps: 30.0,
+            duration: 10.0,
+            has_audio: false,
+        };
+        assert_eq!(info.display_size(), (1080, 1920));
+        assert_eq!(rotation_filter(-90), "transpose=1");
     }
 
     #[test]

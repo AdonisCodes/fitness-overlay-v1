@@ -1,7 +1,7 @@
 //! ffmpeg composition: pipe raw RGBA overlay frames into ffmpeg, composite
 //! them over the source video, and encode the final output.
 
-use crate::video::VideoInfo;
+use crate::video::{rotation_filter, VideoInfo};
 use anyhow::{bail, Context, Result};
 use std::io::{ErrorKind, Write};
 use std::path::Path;
@@ -76,20 +76,25 @@ pub fn compose(
     };
     let total_frames = (video.duration * overlay_fps).ceil().max(1.0) as u64;
 
-    let size = format!("{}x{}", video.width, video.height);
+    let (dw, dh) = video.display_size();
+    let size = format!("{dw}x{dh}");
+    let rotate = rotation_filter(video.rotation);
+    let filter_complex = if rotate.is_empty() {
+        "[0:v][1:v]overlay=eof_action=pass:format=auto[v]".to_string()
+    } else {
+        format!("[0:v]{rotate}[base];[base][1:v]overlay=eof_action=pass:format=auto[v]")
+    };
 
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-hide_banner", "-loglevel", "error", "-nostats", "-y"])
+        .arg("-noautorotate")
         .arg("-i")
         .arg(&video.path)
         .args(["-f", "rawvideo", "-pix_fmt", "rgba"])
         .args(["-video_size", &size])
         .args(["-framerate", &fps_str])
         .args(["-i", "pipe:0"])
-        .args([
-            "-filter_complex",
-            "[0:v][1:v]overlay=eof_action=pass:format=auto[v]",
-        ])
+        .args(["-filter_complex", &filter_complex])
         .args(["-map", "[v]"]);
     if video.has_audio {
         cmd.args(["-map", "0:a", "-c:a", "copy"]);
@@ -105,7 +110,7 @@ pub fn compose(
     let mut child = cmd.spawn().context("spawning ffmpeg (is it installed?)")?;
     let mut stdin = child.stdin.take().expect("child stdin");
 
-    let frame_bytes = (video.width * video.height * 4) as usize;
+    let frame_bytes = (dw * dh * 4) as usize;
     let mut buf = vec![0u8; frame_bytes];
     let mut wrote = 0u64;
     let mut broken_pipe = false;
