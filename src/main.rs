@@ -45,6 +45,11 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = compose::EncoderPref::Auto)]
     encoder: compose::EncoderPref,
 
+    /// libx264 constant rate factor (lower = higher quality, larger files).
+    /// 18 is near-lossless; 23–24 is typical YouTube quality; 26+ is smaller.
+    #[arg(long, default_value_t = 18)]
+    crf: u8,
+
     /// Fast preview: render overlay and encode output at this fps (e.g. `1`).
     /// Skips full frame-by-frame rendering — useful for layout/sync checks.
     #[arg(long)]
@@ -143,7 +148,6 @@ fn main() -> Result<()> {
 
     std::fs::create_dir_all(&cli.out)
         .with_context(|| format!("creating output dir {}", cli.out.display()))?;
-    let enc_args = compose::encoder_args(cli.encoder);
 
     let mut rendered = 0usize;
     for path in &cli.videos {
@@ -206,16 +210,39 @@ fn main() -> Result<()> {
         let compose_opts = compose::ComposeOptions {
             preview_fps: cli.preview_fps,
         };
-        compose::compose(&info, &out_path, &enc_args, compose_opts, |t_v, buf| {
-            if t_v < lo || t_v > hi {
-                buf.fill(0);
-                return Ok(());
+        let encoder_prefs = match cli.encoder {
+            compose::EncoderPref::Auto => compose::auto_encoder_prefs(info.duration),
+            other => vec![other],
+        };
+        let mut encoded = false;
+        for (idx, pref) in encoder_prefs.iter().enumerate() {
+            if out_path.is_file() {
+                let _ = std::fs::remove_file(&out_path);
             }
-            let t_act = t_v + offset;
-            let snap = timeline.snapshot(t_act);
-            renderer.render_frame(&snap, t_act, fade_at(t_v, lo, hi, info.duration), buf);
-            Ok(())
-        })?;
+            let enc_args = compose::encoder_args(*pref, cli.crf);
+            match compose::compose(&info, &out_path, &enc_args, compose_opts, |t_v, buf| {
+                if t_v < lo || t_v > hi {
+                    buf.fill(0);
+                    return Ok(());
+                }
+                let t_act = t_v + offset;
+                let snap = timeline.snapshot(t_act);
+                renderer.render_frame(&snap, t_act, fade_at(t_v, lo, hi, info.duration), buf);
+                Ok(())
+            }) {
+                Ok(()) => {
+                    encoded = true;
+                    break;
+                }
+                Err(e) if idx + 1 < encoder_prefs.len() => {
+                    eprintln!("warning: {pref:?} encode failed ({e:#}), retrying with next encoder");
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        if !encoded {
+            bail!("failed to encode {}", out_path.display());
+        }
         eprintln!("  wrote {}", out_path.display());
         rendered += 1;
     }

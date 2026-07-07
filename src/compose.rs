@@ -3,13 +3,14 @@
 
 use crate::video::{rotation_filter, VideoInfo};
 use anyhow::{bail, Context, Result};
-use std::io::{ErrorKind, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::thread;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum EncoderPref {
-    /// Prefer hardware HEVC (videotoolbox), fall back to libx264.
+    /// Prefer hardware HEVC (videotoolbox) for short clips, fall back to libx264.
     Auto,
     Hevc,
     H264,
@@ -23,17 +24,36 @@ fn ffmpeg_has_encoder(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Encoder order for `Auto` — long videos skip HEVC (videotoolbox often fails).
+pub fn auto_encoder_prefs(duration_secs: f64) -> Vec<EncoderPref> {
+    if duration_secs > 600.0 {
+        return vec![EncoderPref::H264];
+    }
+    if ffmpeg_has_encoder("hevc_videotoolbox") {
+        vec![EncoderPref::Hevc, EncoderPref::H264]
+    } else {
+        vec![EncoderPref::H264]
+    }
+}
+
 /// Resolve encoder preference into concrete ffmpeg args.
-pub fn encoder_args(pref: EncoderPref) -> Vec<&'static str> {
+pub fn encoder_args(pref: EncoderPref, crf: u8) -> Vec<String> {
     let hevc = vec![
-        "-c:v",
-        "hevc_videotoolbox",
-        "-q:v",
-        "55",
-        "-tag:v",
-        "hvc1",
+        "-c:v".to_string(),
+        "hevc_videotoolbox".to_string(),
+        "-q:v".to_string(),
+        "55".to_string(),
+        "-tag:v".to_string(),
+        "hvc1".to_string(),
     ];
-    let x264 = vec!["-c:v", "libx264", "-crf", "18", "-preset", "veryfast"];
+    let x264 = vec![
+        "-c:v".to_string(),
+        "libx264".to_string(),
+        "-crf".to_string(),
+        crf.to_string(),
+        "-preset".to_string(),
+        "veryfast".to_string(),
+    ];
     match pref {
         EncoderPref::Hevc => hevc,
         EncoderPref::H264 => x264,
@@ -55,13 +75,48 @@ pub struct ComposeOptions {
     pub preview_fps: Option<f64>,
 }
 
+fn validate_output(path: &Path, expected_duration: f64) -> Result<()> {
+    let out = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "json",
+        ])
+        .arg(path)
+        .output()
+        .context("running ffprobe on encoded output")?;
+    if !out.status.success() {
+        bail!(
+            "encoded output is not a valid video ({}): {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).context("parsing ffprobe JSON")?;
+    let dur = v["format"]["duration"]
+        .as_str()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    if dur < expected_duration * 0.95 {
+        bail!(
+            "encoded output {} is too short ({dur:.1}s vs expected {expected_duration:.1}s)",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 /// Composite overlay frames produced by `frame_fn` onto `video`, writing the
 /// result to `out_path`. `frame_fn(t_video, buf)` fills `buf` with straight
 /// RGBA pixels at source time `t_video` in seconds.
 pub fn compose(
     video: &VideoInfo,
     out_path: &Path,
-    enc_args: &[&str],
+    enc_args: &[String],
     opts: ComposeOptions,
     mut frame_fn: impl FnMut(f64, &mut [u8]) -> Result<()>,
 ) -> Result<()> {
@@ -86,7 +141,7 @@ pub fn compose(
     };
 
     let mut cmd = Command::new("ffmpeg");
-    cmd.args(["-hide_banner", "-loglevel", "error", "-nostats", "-y"])
+    cmd.args(["-hide_banner", "-loglevel", "warning", "-nostats", "-y"])
         .arg("-noautorotate")
         .arg("-i")
         .arg(&video.path)
@@ -105,10 +160,18 @@ pub fn compose(
     }
     cmd.arg(out_path)
         .stdin(Stdio::piped())
-        .stdout(Stdio::null());
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
 
     let mut child = cmd.spawn().context("spawning ffmpeg (is it installed?)")?;
     let mut stdin = child.stdin.take().expect("child stdin");
+    let mut stderr = child.stderr.take().expect("child stderr");
+
+    let stderr_handle = thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = stderr.read_to_string(&mut buf);
+        buf
+    });
 
     let frame_bytes = (dw * dh * 4) as usize;
     let mut buf = vec![0u8; frame_bytes];
@@ -138,8 +201,29 @@ pub fn compose(
     drop(stdin);
 
     let status = child.wait().context("waiting for ffmpeg")?;
+    let ffmpeg_stderr = stderr_handle.join().unwrap_or_default();
+
+    if !ffmpeg_stderr.is_empty() {
+        for line in ffmpeg_stderr.lines() {
+            if line.contains("Error encoding") || line.contains("error") {
+                eprintln!("ffmpeg: {line}");
+            }
+        }
+    }
+
     if !status.success() {
-        bail!("ffmpeg exited with {status} while writing {}", out_path.display());
+        bail!(
+            "ffmpeg exited with {status} while writing {}: {}",
+            out_path.display(),
+            ffmpeg_stderr.trim()
+        );
+    }
+    if ffmpeg_stderr.contains("Error encoding frame") {
+        bail!(
+            "ffmpeg encoder failed while writing {}: {}",
+            out_path.display(),
+            ffmpeg_stderr.trim()
+        );
     }
     if broken_pipe && wrote < total_frames * 9 / 10 {
         bail!(
@@ -147,5 +231,7 @@ pub fn compose(
             out_path.display()
         );
     }
+
+    validate_output(out_path, video.duration)?;
     Ok(())
 }
